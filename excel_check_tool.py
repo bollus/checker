@@ -64,6 +64,21 @@ def split_cell_ref(cell_ref: str) -> Tuple[str, int]:
     return match.group(1), int(match.group(2))
 
 
+def col_to_num(col: str) -> int:
+    value = 0
+    for char in col:
+        value = value * 26 + ord(char) - 64
+    return value
+
+
+def num_to_col(num: int) -> str:
+    chars: List[str] = []
+    while num > 0:
+        num, remainder = divmod(num - 1, 26)
+        chars.append(chr(65 + remainder))
+    return "".join(reversed(chars))
+
+
 def normalize_text(value: Optional[str]) -> str:
     if value is None:
         return ""
@@ -95,6 +110,14 @@ def normalize_number(value: Optional[str]) -> Decimal:
         return Decimal(text)
     except InvalidOperation as exc:
         raise ValueError(f"Cannot parse numeric value: {value!r}") from exc
+
+
+def decimal_to_text(value: Decimal) -> str:
+    normalized = value.normalize()
+    text = format(normalized, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
 
 
 def default_check_template() -> CheckTemplate:
@@ -207,15 +230,99 @@ def parse_main_range(main_range: str) -> Tuple[str, int]:
     return start_column, int(match.group(2))
 
 
+def infer_data_end_row(sheet: SheetXml, start_row: int) -> int:
+    current = start_row
+    last_seen = start_row
+    max_row = max(sheet.rows) if sheet.rows else start_row
+    while current <= max_row:
+        anchor_value = sheet.get_value(f"A{current}")
+        if anchor_value in (None, ""):
+            break
+        try:
+            normalize_number(anchor_value)
+        except Exception:
+            break
+        last_seen = current
+        current += 1
+    return last_seen
+
+
+def expand_n_row(row_text: str, sheet: SheetXml, start_row: int) -> int:
+    return infer_data_end_row(sheet, start_row) if row_text == "N" else int(row_text)
+
+
+def parse_table_b_expression_tokens(expression: str) -> List[str]:
+    text = expression.strip().upper()
+    if not text.startswith("SUM(") or not text.endswith(")"):
+        raise WorkbookError(f"考勤表表达式格式不正确: {expression}")
+    inner = text[4:-1].strip()
+    if not inner:
+        raise WorkbookError(f"SUM 表达式不能为空: {expression}")
+    return [part.strip() for part in inner.split(",") if part.strip()]
+
+
+def validate_table_b_expression(expression: str) -> None:
+    text = expression.strip().upper()
+    if text.startswith("SUM("):
+        for token in parse_table_b_expression_tokens(text):
+            if ":" in token:
+                start_ref, end_ref = token.split(":", 1)
+                start_match = re.fullmatch(r"([A-Z]+)(\d+)", start_ref)
+                end_match = re.fullmatch(r"([A-Z]+)(\d+|N)", end_ref)
+                if not start_match or not end_match:
+                    raise WorkbookError(f"SUM 范围格式不正确: {token}")
+                if col_to_num(start_match.group(1)) > col_to_num(end_match.group(1)):
+                    raise WorkbookError(f"SUM 范围起始列不能大于结束列: {token}")
+                if int(start_match.group(2)) > (999999 if end_match.group(2) == 'N' else int(end_match.group(2))):
+                    raise WorkbookError(f"SUM 范围起始行不能大于结束行: {token}")
+            else:
+                split_cell_ref(token)
+        return
+    split_cell_ref(text)
+
+
+def iter_range_cells(start_ref: str, end_ref: str, sheet: SheetXml) -> List[str]:
+    start_col, start_row = split_cell_ref(start_ref)
+    end_match = re.fullmatch(r"([A-Z]+)(\d+|N)", end_ref)
+    if end_match is None:
+        raise WorkbookError(f"范围终点格式不正确: {end_ref}")
+    end_col = end_match.group(1)
+    end_row = expand_n_row(end_match.group(2), sheet, start_row)
+    refs: List[str] = []
+    for col_num in range(col_to_num(start_col), col_to_num(end_col) + 1):
+        col = num_to_col(col_num)
+        for row_num in range(start_row, end_row + 1):
+            refs.append(f"{col}{row_num}")
+    return refs
+
+
+def resolve_table_b_value(sheet: SheetXml, expression: str) -> Optional[str]:
+    text = expression.strip().upper()
+    if not text.startswith("SUM("):
+        return sheet.get_value(text)
+
+    total = Decimal("0")
+    for token in parse_table_b_expression_tokens(text):
+        if ":" in token:
+            start_ref, end_ref = token.split(":", 1)
+            refs = iter_range_cells(start_ref, end_ref, sheet)
+        else:
+            refs = [token]
+        for ref in refs:
+            total += normalize_number(sheet.get_value(ref))
+    return decimal_to_text(total)
+
+
 def parse_check_template(template: CheckTemplate) -> List[ParsedCheckRule]:
     parsed_rules: List[ParsedCheckRule] = []
     for rule in template.rules:
         main_column, main_start_row = parse_main_range(rule.main_range)
+        validate_table_b_expression(rule.table_b_cell)
         parsed_rules.append(
             ParsedCheckRule(
                 field_name=rule.field_name,
                 main_range=rule.main_range,
-                table_b_cell=rule.table_b_cell.upper(),
+                table_b_cell=rule.table_b_cell.strip().upper(),
                 compare_type=rule.compare_type,
                 main_column=main_column,
                 main_start_row=main_start_row,
@@ -636,7 +743,7 @@ def compare_row(
     for rule in parsed_rules:
         table_a_cell = f"{rule.main_column}{rule.main_start_row + offset}"
         left = table_a_sheet.get_value(table_a_cell)
-        right = None if table_b_sheet is None else table_b_sheet.get_value(rule.table_b_cell)
+        right = None if table_b_sheet is None else resolve_table_b_value(table_b_sheet, rule.table_b_cell)
         if table_b_sheet is None:
             matches = False
         else:
@@ -1127,14 +1234,14 @@ def launch_gui() -> None:
             values=(COMPARE_TYPE_TEXT, COMPARE_TYPE_NUMBER, COMPARE_TYPE_POSITION),
         ).grid(row=3, column=1, sticky="ew", padx=(0, 12), pady=(0, 8))
 
-        ttk.Label(dialog, text="示例：主表范围填 F7-Fn，考勤表坐标填 H4").grid(
+        ttk.Label(dialog, text="示例：主表范围填 F7-Fn；考勤表填 H4 或 SUM(G10:Gn) 或 SUM(H10:Hn,I10:In,J10:Jn)").grid(
             row=4, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8)
         )
 
         def confirm() -> None:
             try:
                 parse_main_range(range_var.get().strip().upper())
-                split_cell_ref(b_cell_var.get().strip().upper())
+                validate_table_b_expression(b_cell_var.get().strip().upper())
             except Exception as exc:
                 messagebox.showerror("规则无效", str(exc), parent=dialog)
                 return
@@ -1377,7 +1484,7 @@ def launch_gui() -> None:
 
     ttk.Label(
         template_right,
-        text="规则格式示例：主表 F3-Fn 对应 考勤表 H4。比较类型可选 text / number / position。",
+        text="规则示例：主表 F3-Fn 对应 H4；或主表 N7-Nn 对应 SUM(G10:Gn)；比较类型可选 text / number / position。",
     ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
     template_action_bar = ttk.Frame(template_right)
