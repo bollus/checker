@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import json
 import re
 import sys
 import zipfile
@@ -34,6 +35,22 @@ NUMERIC_FIELDS = {
     "X": ("I9", "周末加班"),
     "Y": ("J9", "法定假日加班"),
 }
+POSITION_OPTIONAL_TOKENS = {
+    "construction",
+    "mechanical",
+    "civil",
+    "ei",
+    "piping",
+    "inspector",
+    "supervisor",
+    "officer",
+}
+POSITION_ALIASES_PATH = Path(__file__).with_name("position_aliases.json")
+CHECK_TEMPLATES_PATH = Path(__file__).with_name("check_templates.json")
+COMPARE_TYPE_TEXT = "text"
+COMPARE_TYPE_NUMBER = "number"
+COMPARE_TYPE_POSITION = "position"
+DEFAULT_CHECK_TEMPLATE_NAME = "默认模板"
 
 
 def qn(name: str, ns: str = MAIN_NS) -> str:
@@ -80,8 +97,233 @@ def normalize_number(value: Optional[str]) -> Decimal:
         raise ValueError(f"Cannot parse numeric value: {value!r}") from exc
 
 
+def default_check_template() -> CheckTemplate:
+    return CheckTemplate(
+        name=DEFAULT_CHECK_TEMPLATE_NAME,
+        number_column="A",
+        start_row=7,
+        rules=[
+            CheckRule("姓名", "F7-Fn", "A3", COMPARE_TYPE_TEXT),
+            CheckRule("岗位", "J7-Jn", "C3", COMPARE_TYPE_POSITION),
+            CheckRule("应支付天数", "N7-Nn", "B6", COMPARE_TYPE_NUMBER),
+            CheckRule("正常工作日加班", "W7-Wn", "H9", COMPARE_TYPE_NUMBER),
+            CheckRule("周末加班", "X7-Xn", "I9", COMPARE_TYPE_NUMBER),
+            CheckRule("法定假日加班", "Y7-Yn", "J9", COMPARE_TYPE_NUMBER),
+        ],
+    )
+
+
+def template_to_dict(template: CheckTemplate) -> Dict[str, object]:
+    return {
+        "name": template.name,
+        "number_column": template.number_column,
+        "start_row": template.start_row,
+        "rules": [
+            {
+                "field_name": rule.field_name,
+                "main_range": rule.main_range,
+                "table_b_cell": rule.table_b_cell,
+                "compare_type": rule.compare_type,
+            }
+            for rule in template.rules
+        ],
+    }
+
+
+def check_rule_from_dict(data: Dict[str, object]) -> CheckRule:
+    field_name = str(data.get("field_name", "")).strip()
+    main_range = str(data.get("main_range", "")).strip().upper()
+    table_b_cell = str(data.get("table_b_cell", "")).strip().upper()
+    compare_type = str(data.get("compare_type", COMPARE_TYPE_TEXT)).strip().lower()
+    if compare_type not in {COMPARE_TYPE_TEXT, COMPARE_TYPE_NUMBER, COMPARE_TYPE_POSITION}:
+        compare_type = COMPARE_TYPE_TEXT
+    if not field_name or not main_range or not table_b_cell:
+        raise WorkbookError("核对模板规则缺少字段名、主表范围或考勤表坐标")
+    return CheckRule(
+        field_name=field_name,
+        main_range=main_range,
+        table_b_cell=table_b_cell,
+        compare_type=compare_type,
+    )
+
+
+def check_template_from_dict(data: Dict[str, object]) -> CheckTemplate:
+    name = str(data.get("name", "")).strip() or DEFAULT_CHECK_TEMPLATE_NAME
+    number_column = str(data.get("number_column", "A")).strip().upper() or "A"
+    start_row = int(data.get("start_row", 7))
+    rules_data = data.get("rules", [])
+    if not isinstance(rules_data, list) or not rules_data:
+        raise WorkbookError(f"核对模板 {name} 没有规则")
+    rules = [check_rule_from_dict(item) for item in rules_data if isinstance(item, dict)]
+    return CheckTemplate(name=name, number_column=number_column, start_row=start_row, rules=rules)
+
+
+def load_check_templates() -> List[CheckTemplate]:
+    templates: List[CheckTemplate] = []
+    if CHECK_TEMPLATES_PATH.exists():
+        try:
+            raw = json.loads(CHECK_TEMPLATES_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            raw = []
+        if isinstance(raw, list):
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    templates.append(check_template_from_dict(item))
+                except Exception:
+                    continue
+    if not any(template.name == DEFAULT_CHECK_TEMPLATE_NAME for template in templates):
+        templates.insert(0, default_check_template())
+    return templates
+
+
+def save_check_templates(templates: List[CheckTemplate]) -> None:
+    ordered = sorted(templates, key=lambda item: (item.name != DEFAULT_CHECK_TEMPLATE_NAME, item.name.casefold()))
+    CHECK_TEMPLATES_PATH.write_text(
+        json.dumps([template_to_dict(template) for template in ordered], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def get_check_template(template_name: Optional[str]) -> CheckTemplate:
+    templates = load_check_templates()
+    if template_name:
+        for template in templates:
+            if template.name == template_name:
+                return template
+        raise WorkbookError(f"未找到核对模板: {template_name}")
+    return templates[0]
+
+
+def parse_main_range(main_range: str) -> Tuple[str, int]:
+    match = re.fullmatch(r"([A-Z]+)(\d+)-([A-Z]+)N", main_range.strip().upper())
+    if not match:
+        raise WorkbookError(f"主表范围格式不正确: {main_range}，示例应为 F7-Fn")
+    start_column = match.group(1)
+    end_column = match.group(3)
+    if start_column != end_column:
+        raise WorkbookError(f"当前仅支持同一列的范围模板: {main_range}")
+    return start_column, int(match.group(2))
+
+
+def parse_check_template(template: CheckTemplate) -> List[ParsedCheckRule]:
+    parsed_rules: List[ParsedCheckRule] = []
+    for rule in template.rules:
+        main_column, main_start_row = parse_main_range(rule.main_range)
+        parsed_rules.append(
+            ParsedCheckRule(
+                field_name=rule.field_name,
+                main_range=rule.main_range,
+                table_b_cell=rule.table_b_cell.upper(),
+                compare_type=rule.compare_type,
+                main_column=main_column,
+                main_start_row=main_start_row,
+            )
+        )
+    return parsed_rules
+
+
+_POSITION_ALIASES_CACHE: Optional[Dict[str, str]] = None
+
+
+def load_position_aliases() -> Dict[str, str]:
+    global _POSITION_ALIASES_CACHE
+    if _POSITION_ALIASES_CACHE is not None:
+        return _POSITION_ALIASES_CACHE
+
+    aliases: Dict[str, str] = {}
+    if POSITION_ALIASES_PATH.exists():
+        try:
+            data = json.loads(POSITION_ALIASES_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        if isinstance(data, dict):
+            for key, value in data.items():
+                normalized_key = normalize_text(str(key))
+                normalized_value = normalize_text(str(value))
+                if normalized_key and normalized_value:
+                    aliases[normalized_key] = normalized_value
+    _POSITION_ALIASES_CACHE = aliases
+    return aliases
+
+
+def canonical_position_tokens(value: Optional[str]) -> Tuple[str, ...]:
+    text = normalize_text(value)
+    if not text:
+        return ()
+    text = load_position_aliases().get(text, text)
+
+    replacements = [
+        (r"\be\s*&\s*i\b", " ei "),
+        (r"\be\s+i\b", " ei "),
+        (r"\bqci\b", " qc inspector "),
+        (r"\bmec\b", " mechanical "),
+        (r"\badmin\b", " administrator "),
+        (r"\bconstrucion\b", " construction "),
+        (r"\bcontroler\b", " controller "),
+        (r"\bkeepr\b", " keeper "),
+        (r"\bscaffolder\b", " scaffolding "),
+    ]
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text)
+
+    text = re.sub(r"[().,/]", " ", text)
+    text = re.sub(r"\s*-\s*", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return ()
+
+    tokens = sorted(set(text.split()))
+    return tuple(tokens)
+
+
+def positions_mean_same(left: Optional[str], right: Optional[str]) -> bool:
+    left_tokens = canonical_position_tokens(left)
+    right_tokens = canonical_position_tokens(right)
+    if left_tokens == right_tokens:
+        return True
+    if not left_tokens or not right_tokens:
+        return left_tokens == right_tokens
+
+    left_set = set(left_tokens)
+    right_set = set(right_tokens)
+    if left_set == right_set:
+        return True
+
+    smaller, larger = sorted((left_set, right_set), key=len)
+    extra_tokens = larger - smaller
+    return len(smaller) >= 2 and smaller.issubset(larger) and extra_tokens.issubset(POSITION_OPTIONAL_TOKENS)
+
+
 class WorkbookError(Exception):
     pass
+
+
+@dataclass
+class CheckRule:
+    field_name: str
+    main_range: str
+    table_b_cell: str
+    compare_type: str
+
+
+@dataclass
+class ParsedCheckRule:
+    field_name: str
+    main_range: str
+    table_b_cell: str
+    compare_type: str
+    main_column: str
+    main_start_row: int
+
+
+@dataclass
+class CheckTemplate:
+    name: str
+    number_column: str
+    start_row: int
+    rules: List[CheckRule]
 
 
 class SheetXml:
@@ -381,44 +623,35 @@ class Mismatch:
 
 
 def compare_row(
-    row_num: int,
+    offset: int,
     table_a_sheet: SheetXml,
     table_b_sheet: Optional[SheetXml],
     table_b_file: Optional[Path],
+    parsed_rules: List[ParsedCheckRule],
+    display_row_num: int,
 ) -> List[Mismatch]:
     mismatches: List[Mismatch] = []
     file_name = table_b_file.name if table_b_file else "未找到匹配考勤表"
 
-    for table_a_col, (table_b_ref, field_name) in TEXT_FIELDS.items():
-        table_a_cell = f"{table_a_col}{row_num}"
+    for rule in parsed_rules:
+        table_a_cell = f"{rule.main_column}{rule.main_start_row + offset}"
         left = table_a_sheet.get_value(table_a_cell)
-        right = None if table_b_sheet is None else table_b_sheet.get_value(table_b_ref)
-        if normalize_text(left) != normalize_text(right):
-            mismatches.append(
-                Mismatch(
-                    row_num=row_num,
-                    table_a_cell=table_a_cell,
-                    field_name=field_name,
-                    table_a_value=to_display(left),
-                    table_b_value=to_display(right),
-                    table_b_file=file_name,
-                )
-            )
-
-    for table_a_col, (table_b_ref, field_name) in NUMERIC_FIELDS.items():
-        table_a_cell = f"{table_a_col}{row_num}"
-        left = table_a_sheet.get_value(table_a_cell)
-        right = None if table_b_sheet is None else table_b_sheet.get_value(table_b_ref)
+        right = None if table_b_sheet is None else table_b_sheet.get_value(rule.table_b_cell)
         if table_b_sheet is None:
-            mismatch = True
+            matches = False
         else:
-            mismatch = abs(normalize_number(left) - normalize_number(right)) > NUMERIC_TOLERANCE
-        if mismatch:
+            if rule.compare_type == COMPARE_TYPE_NUMBER:
+                matches = abs(normalize_number(left) - normalize_number(right)) <= NUMERIC_TOLERANCE
+            elif rule.compare_type == COMPARE_TYPE_POSITION:
+                matches = positions_mean_same(left, right)
+            else:
+                matches = normalize_text(left) == normalize_text(right)
+        if not matches:
             mismatches.append(
                 Mismatch(
-                    row_num=row_num,
+                    row_num=display_row_num,
                     table_a_cell=table_a_cell,
-                    field_name=field_name,
+                    field_name=rule.field_name,
                     table_a_value=to_display(left),
                     table_b_value=to_display(right),
                     table_b_file=file_name,
@@ -427,16 +660,17 @@ def compare_row(
     return mismatches
 
 
-def locate_data_rows(sheet: SheetXml, start_row: int = 7) -> List[int]:
-    rows: List[int] = []
-    current = start_row
+def locate_data_offsets(sheet: SheetXml, template: CheckTemplate, parsed_rules: List[ParsedCheckRule]) -> List[int]:
+    offsets: List[int] = []
+    current_offset = 0
     while True:
-        refs = [f"A{current}", f"F{current}", f"J{current}", f"N{current}", f"W{current}", f"X{current}", f"Y{current}"]
+        refs = [f"{template.number_column}{template.start_row + current_offset}"]
+        refs.extend(f"{rule.main_column}{rule.main_start_row + current_offset}" for rule in parsed_rules)
         if all(sheet.get_value(ref) in (None, "") for ref in refs):
             break
-        rows.append(current)
-        current += 1
-    return rows
+        offsets.append(current_offset)
+        current_offset += 1
+    return offsets
 
 
 def create_report(
@@ -469,7 +703,12 @@ def create_report(
     report_path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def run_check(table_a_path: Path, table_bs_folder: Path, output_path: Optional[Path] = None) -> Tuple[Path, Path, List[Mismatch], List[str]]:
+def run_check(
+    table_a_path: Path,
+    table_bs_folder: Path,
+    output_path: Optional[Path] = None,
+    template_name: Optional[str] = None,
+) -> Tuple[Path, Path, List[Mismatch], List[str]]:
     if table_a_path.suffix.lower() not in {".xlsx", ".xlsm"}:
         raise WorkbookError("主表只支持 .xlsx 或 .xlsm")
     if not table_bs_folder.is_dir():
@@ -483,8 +722,10 @@ def run_check(table_a_path: Path, table_bs_folder: Path, output_path: Optional[P
     table_a_sheet_info = table_a_sheets[0]
     table_a_sheet = table_a_sheet_info.sheet
 
+    check_template = get_check_template(template_name)
+    parsed_rules = parse_check_template(check_template)
     table_b_files, warnings = build_table_b_index(table_bs_folder)
-    data_rows = locate_data_rows(table_a_sheet)
+    data_offsets = locate_data_offsets(table_a_sheet, check_template, parsed_rules)
 
     styles_root = table_a_book.load_xml("xl/styles.xml")
     highlight_style_for = add_highlight_style(styles_root)
@@ -492,14 +733,17 @@ def run_check(table_a_path: Path, table_bs_folder: Path, output_path: Optional[P
     mismatches: List[Mismatch] = []
     workbook_cache: Dict[Path, WorkbookSheet] = {}
 
-    for row_num in data_rows:
-        row_number_raw = table_a_sheet.get_value(f"A{row_num}")
+    for offset in data_offsets:
+        display_row_num = check_template.start_row + offset
+        row_number_raw = table_a_sheet.get_value(f"{check_template.number_column}{display_row_num}")
         if row_number_raw is None or str(row_number_raw).strip() == "":
             continue
         try:
             file_number = int(Decimal(str(row_number_raw)))
         except InvalidOperation as exc:
-            raise WorkbookError(f"主表 A{row_num} 不是有效编号: {row_number_raw!r}") from exc
+            raise WorkbookError(
+                f"主表 {check_template.number_column}{display_row_num} 不是有效编号: {row_number_raw!r}"
+            ) from exc
 
         table_b_path = table_b_files.get(file_number)
         table_b_sheet: Optional[SheetXml] = None
@@ -512,7 +756,7 @@ def run_check(table_a_path: Path, table_bs_folder: Path, output_path: Optional[P
                 workbook_cache[table_b_path] = table_b_sheet_info
             table_b_sheet = workbook_cache[table_b_path].sheet
 
-        row_mismatches = compare_row(row_num, table_a_sheet, table_b_sheet, table_b_path)
+        row_mismatches = compare_row(offset, table_a_sheet, table_b_sheet, table_b_path, parsed_rules, display_row_num)
         mismatches.extend(row_mismatches)
         for mismatch in row_mismatches:
             highlight_cell(table_a_sheet, mismatch.table_a_cell, highlight_style_for)
@@ -531,6 +775,7 @@ def cli(argv: List[str]) -> int:
     parser.add_argument("--table-a", help="主表路径 (.xlsx/.xlsm)")
     parser.add_argument("--table-bs", help="考勤表目录路径")
     parser.add_argument("--output", help="输出文件路径")
+    parser.add_argument("--template-name", help="核对模板名称")
     args = parser.parse_args(argv)
 
     if not args.table_a and not args.table_bs and not args.output:
@@ -544,6 +789,7 @@ def cli(argv: List[str]) -> int:
         table_a_path=Path(args.table_a),
         table_bs_folder=Path(args.table_bs),
         output_path=Path(args.output) if args.output else None,
+        template_name=args.template_name,
     )
     print(f"结果文件: {output}")
     print(f"报告文件: {report}")
@@ -561,20 +807,24 @@ def launch_gui() -> None:
 
     root = tk.Tk()
     root.title("表格工具")
-    root.geometry("860x620")
+    root.geometry("980x700")
 
     notebook = ttk.Notebook(root)
     notebook.pack(fill="both", expand=True)
 
     check_tab = ttk.Frame(notebook, padding=16)
     generate_tab = ttk.Frame(notebook, padding=16)
+    template_tab = ttk.Frame(notebook, padding=16)
     notebook.add(check_tab, text="工资表核对")
-    notebook.add(generate_tab, text="根据表C生成表B")
+    notebook.add(generate_tab, text="生成考勤表")
+    notebook.add(template_tab, text="核对模板")
 
-    for tab in (check_tab, generate_tab):
+    for tab in (check_tab, generate_tab, template_tab):
         tab.columnconfigure(1, weight=1)
-    check_tab.rowconfigure(5, weight=1)
+    check_tab.rowconfigure(7, weight=1)
     generate_tab.rowconfigure(7, weight=1)
+    template_tab.columnconfigure(1, weight=1)
+    template_tab.rowconfigure(0, weight=1)
 
     def clear_log(widget: tk.Text) -> None:
         widget.configure(state="normal")
@@ -587,9 +837,36 @@ def launch_gui() -> None:
         widget.see("end")
         widget.configure(state="disabled")
 
+    templates_state = load_check_templates()
+
+    def template_names() -> List[str]:
+        return [template.name for template in templates_state]
+
+    def refresh_template_choices(selected_name: Optional[str] = None) -> None:
+        names = template_names()
+        check_template_combo["values"] = names
+        if selected_name in names:
+            check_template_var.set(selected_name)
+        elif check_template_var.get() not in names:
+            check_template_var.set(names[0] if names else "")
+
+        template_listbox.delete(0, "end")
+        for name in names:
+            template_listbox.insert("end", name)
+        if selected_name in names:
+            index = names.index(selected_name)
+            template_listbox.selection_clear(0, "end")
+            template_listbox.selection_set(index)
+            template_listbox.activate(index)
+        elif names:
+            template_listbox.selection_clear(0, "end")
+            template_listbox.selection_set(0)
+            template_listbox.activate(0)
+
     table_a_var = tk.StringVar()
     table_bs_var = tk.StringVar()
     output_var = tk.StringVar()
+    check_template_var = tk.StringVar(value=template_names()[0] if templates_state else "")
 
     def choose_table_a() -> None:
         path = filedialog.askopenfilename(
@@ -620,6 +897,7 @@ def launch_gui() -> None:
         table_a_text = table_a_var.get().strip()
         table_bs_text = table_bs_var.get().strip()
         output_text = output_var.get().strip()
+        template_name = check_template_var.get().strip() or None
         if not table_a_text:
             messagebox.showerror("缺少主表", "请选择主表文件。")
             return
@@ -628,12 +906,13 @@ def launch_gui() -> None:
             return
         check_button.configure(state="disabled")
         clear_log(check_log_text)
-        append_log(check_log_text, "开始核对...")
+        append_log(check_log_text, f"开始核对，模板: {template_name or DEFAULT_CHECK_TEMPLATE_NAME}")
         try:
             output, report, mismatches, warnings = run_check(
                 table_a_path=Path(table_a_text),
                 table_bs_folder=Path(table_bs_text),
                 output_path=Path(output_text) if output_text else None,
+                template_name=template_name,
             )
         except Exception as exc:
             append_log(check_log_text, f"失败: {exc}")
@@ -663,12 +942,19 @@ def launch_gui() -> None:
     ttk.Entry(check_tab, textvariable=output_var).grid(row=2, column=1, sticky="ew", padx=(8, 8), pady=(0, 8))
     ttk.Button(check_tab, text="选择位置", command=choose_output).grid(row=2, column=2, sticky="ew", pady=(0, 8))
 
-    check_button = ttk.Button(check_tab, text="开始核对", command=start_check)
-    check_button.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(4, 8))
+    ttk.Label(check_tab, text="核对模板").grid(row=3, column=0, sticky="w", pady=(0, 8))
+    check_template_combo = ttk.Combobox(check_tab, textvariable=check_template_var, state="readonly")
+    check_template_combo.grid(row=3, column=1, sticky="ew", padx=(8, 8), pady=(0, 8))
+    ttk.Button(check_tab, text="去模板页编辑", command=lambda: notebook.select(template_tab)).grid(
+        row=3, column=2, sticky="ew", pady=(0, 8)
+    )
 
-    ttk.Label(check_tab, text="日志").grid(row=4, column=0, columnspan=3, sticky="w", pady=(0, 6))
+    check_button = ttk.Button(check_tab, text="开始核对", command=start_check)
+    check_button.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(4, 8))
+
+    ttk.Label(check_tab, text="日志").grid(row=6, column=0, columnspan=3, sticky="w", pady=(0, 6))
     check_log_text = tk.Text(check_tab, height=16, wrap="word", state="disabled")
-    check_log_text.grid(row=5, column=0, columnspan=3, sticky="nsew")
+    check_log_text.grid(row=7, column=0, columnspan=3, sticky="nsew")
 
     table_c_var = tk.StringVar()
     template_b_var = tk.StringVar()
@@ -677,25 +963,25 @@ def launch_gui() -> None:
 
     def choose_table_c() -> None:
         path = filedialog.askopenfilename(
-            title="选择表C",
+            title="选择汇总表",
             filetypes=[("Excel 文件", "*.xlsx *.xlsm")],
         )
         if not path:
             return
         table_c_var.set(path)
         if not generate_output_var.get():
-            generate_output_var.set(str(Path(path).with_name(f"{Path(path).stem}_生成表Bs")))
+            generate_output_var.set(str(Path(path).with_name(f"{Path(path).stem}_生成考勤表目录")))
 
     def choose_template_b() -> None:
         path = filedialog.askopenfilename(
-            title="选择表B模板",
+            title="选择考勤表模板",
             filetypes=[("Excel 文件", "*.xlsx *.xlsm")],
         )
         if path:
             template_b_var.set(path)
 
     def choose_generate_bs_dir() -> None:
-        path = filedialog.askdirectory(title="选择现有表B目录")
+        path = filedialog.askdirectory(title="选择现有考勤表目录")
         if path:
             generate_table_bs_var.set(path)
 
@@ -713,15 +999,15 @@ def launch_gui() -> None:
         output_dir_text = generate_output_var.get().strip()
 
         if not table_c_text:
-            messagebox.showerror("缺少表C", "请选择表C文件。")
+            messagebox.showerror("缺少汇总表", "请选择汇总表文件。")
             return
         if not template_b_text and not table_bs_dir_text:
-            messagebox.showerror("缺少模板", "请选择表B模板，或选择现有表B目录。")
+            messagebox.showerror("缺少模板", "请选择考勤表模板，或选择现有考勤表目录。")
             return
 
         generate_button.configure(state="disabled")
         clear_log(generate_log_text)
-        append_log(generate_log_text, "开始生成表B...")
+        append_log(generate_log_text, "开始生成考勤表...")
         try:
             template_path = choose_template_file(template_b_text or None, table_bs_dir_text or None)
             append_log(generate_log_text, f"使用模板: {template_path}")
@@ -748,15 +1034,15 @@ def launch_gui() -> None:
         finally:
             generate_button.configure(state="normal")
 
-    ttk.Label(generate_tab, text="表C").grid(row=0, column=0, sticky="w", pady=(0, 8))
+    ttk.Label(generate_tab, text="汇总表").grid(row=0, column=0, sticky="w", pady=(0, 8))
     ttk.Entry(generate_tab, textvariable=table_c_var).grid(row=0, column=1, sticky="ew", padx=(8, 8), pady=(0, 8))
     ttk.Button(generate_tab, text="选择文件", command=choose_table_c).grid(row=0, column=2, sticky="ew", pady=(0, 8))
 
-    ttk.Label(generate_tab, text="表B模板").grid(row=1, column=0, sticky="w", pady=(0, 8))
+    ttk.Label(generate_tab, text="考勤表模板").grid(row=1, column=0, sticky="w", pady=(0, 8))
     ttk.Entry(generate_tab, textvariable=template_b_var).grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=(0, 8))
     ttk.Button(generate_tab, text="选择模板", command=choose_template_b).grid(row=1, column=2, sticky="ew", pady=(0, 8))
 
-    ttk.Label(generate_tab, text="现有表B目录").grid(row=2, column=0, sticky="w", pady=(0, 8))
+    ttk.Label(generate_tab, text="现有考勤表目录").grid(row=2, column=0, sticky="w", pady=(0, 8))
     ttk.Entry(generate_tab, textvariable=generate_table_bs_var).grid(row=2, column=1, sticky="ew", padx=(8, 8), pady=(0, 8))
     ttk.Button(generate_tab, text="选择目录", command=choose_generate_bs_dir).grid(row=2, column=2, sticky="ew", pady=(0, 8))
 
@@ -766,15 +1052,345 @@ def launch_gui() -> None:
 
     ttk.Label(
         generate_tab,
-        text="说明：优先使用“表B模板”；如果不填模板，就会从“现有表B目录”里自动挑一个可用文件做模板。",
+        text="说明：优先使用“考勤表模板”；如果不填模板，就会从“现有考勤表目录”里自动挑一个可用文件做模板。",
     ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(0, 8))
 
-    generate_button = ttk.Button(generate_tab, text="开始生成表B", command=start_generate)
+    generate_button = ttk.Button(generate_tab, text="开始生成考勤表", command=start_generate)
     generate_button.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, 8))
 
     ttk.Label(generate_tab, text="日志").grid(row=6, column=0, columnspan=3, sticky="w", pady=(0, 6))
     generate_log_text = tk.Text(generate_tab, height=14, wrap="word", state="disabled")
     generate_log_text.grid(row=7, column=0, columnspan=3, sticky="nsew")
+
+    template_left = ttk.Frame(template_tab)
+    template_right = ttk.Frame(template_tab)
+    template_left.grid(row=0, column=0, sticky="nsw", padx=(0, 12))
+    template_right.grid(row=0, column=1, sticky="nsew")
+    template_right.columnconfigure(1, weight=1)
+    template_right.rowconfigure(4, weight=1)
+
+    ttk.Label(template_left, text="模板列表").pack(anchor="w")
+    template_listbox = tk.Listbox(template_left, height=18, exportselection=False)
+    template_listbox.pack(fill="y", expand=False, pady=(6, 8))
+
+    template_name_var = tk.StringVar()
+    template_number_column_var = tk.StringVar()
+    template_start_row_var = tk.StringVar()
+    rules_tree = ttk.Treeview(
+        template_right,
+        columns=("field_name", "main_range", "table_b_cell", "compare_type"),
+        show="headings",
+        height=12,
+    )
+    for column, title, width in [
+        ("field_name", "字段名", 140),
+        ("main_range", "主表范围", 140),
+        ("table_b_cell", "考勤表坐标", 120),
+        ("compare_type", "比较类型", 100),
+    ]:
+        rules_tree.heading(column, text=title)
+        rules_tree.column(column, width=width, anchor="w")
+
+    current_template_name: Optional[str] = None
+
+    def selected_rule_values() -> Optional[Tuple[str, str, str, str]]:
+        selected = rules_tree.selection()
+        if not selected:
+            return None
+        values = rules_tree.item(selected[0], "values")
+        return tuple(str(value) for value in values)
+
+    def open_rule_dialog(initial: Optional[Tuple[str, str, str, str]] = None) -> Optional[Tuple[str, str, str, str]]:
+        dialog = tk.Toplevel(root)
+        dialog.title("规则")
+        dialog.transient(root)
+        dialog.grab_set()
+        dialog.columnconfigure(1, weight=1)
+
+        field_var = tk.StringVar(value=initial[0] if initial else "")
+        range_var = tk.StringVar(value=initial[1] if initial else "")
+        b_cell_var = tk.StringVar(value=initial[2] if initial else "")
+        compare_var = tk.StringVar(value=initial[3] if initial else COMPARE_TYPE_TEXT)
+        result: Dict[str, Tuple[str, str, str, str]] = {}
+
+        ttk.Label(dialog, text="字段名").grid(row=0, column=0, sticky="w", padx=12, pady=(12, 8))
+        ttk.Entry(dialog, textvariable=field_var).grid(row=0, column=1, sticky="ew", padx=(0, 12), pady=(12, 8))
+        ttk.Label(dialog, text="主表范围").grid(row=1, column=0, sticky="w", padx=12, pady=(0, 8))
+        ttk.Entry(dialog, textvariable=range_var).grid(row=1, column=1, sticky="ew", padx=(0, 12), pady=(0, 8))
+        ttk.Label(dialog, text="考勤表坐标").grid(row=2, column=0, sticky="w", padx=12, pady=(0, 8))
+        ttk.Entry(dialog, textvariable=b_cell_var).grid(row=2, column=1, sticky="ew", padx=(0, 12), pady=(0, 8))
+        ttk.Label(dialog, text="比较类型").grid(row=3, column=0, sticky="w", padx=12, pady=(0, 8))
+        ttk.Combobox(
+            dialog,
+            textvariable=compare_var,
+            state="readonly",
+            values=(COMPARE_TYPE_TEXT, COMPARE_TYPE_NUMBER, COMPARE_TYPE_POSITION),
+        ).grid(row=3, column=1, sticky="ew", padx=(0, 12), pady=(0, 8))
+
+        ttk.Label(dialog, text="示例：主表范围填 F7-Fn，考勤表坐标填 H4").grid(
+            row=4, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8)
+        )
+
+        def confirm() -> None:
+            try:
+                parse_main_range(range_var.get().strip().upper())
+                split_cell_ref(b_cell_var.get().strip().upper())
+            except Exception as exc:
+                messagebox.showerror("规则无效", str(exc), parent=dialog)
+                return
+            result["rule"] = (
+                field_var.get().strip(),
+                range_var.get().strip().upper(),
+                b_cell_var.get().strip().upper(),
+                compare_var.get().strip().lower(),
+            )
+            dialog.destroy()
+
+        button_row = ttk.Frame(dialog)
+        button_row.grid(row=5, column=0, columnspan=2, sticky="e", padx=12, pady=(4, 12))
+        ttk.Button(button_row, text="取消", command=dialog.destroy).pack(side="right")
+        ttk.Button(button_row, text="确定", command=confirm).pack(side="right", padx=(0, 8))
+
+        dialog.wait_window()
+        return result.get("rule")
+
+    def fill_rules_tree(template: CheckTemplate) -> None:
+        for item in rules_tree.get_children():
+            rules_tree.delete(item)
+        for rule in template.rules:
+            rules_tree.insert("", "end", values=(rule.field_name, rule.main_range, rule.table_b_cell, rule.compare_type))
+
+    def template_by_name(name: str) -> CheckTemplate:
+        for template in templates_state:
+            if template.name == name:
+                return copy.deepcopy(template)
+        raise WorkbookError(f"未找到模板: {name}")
+
+    def load_template_to_form(name: str) -> None:
+        nonlocal current_template_name
+        template = template_by_name(name)
+        current_template_name = template.name
+        template_name_var.set(template.name)
+        template_number_column_var.set(template.number_column)
+        template_start_row_var.set(str(template.start_row))
+        fill_rules_tree(template)
+
+    def current_form_template() -> CheckTemplate:
+        name = template_name_var.get().strip()
+        number_column = template_number_column_var.get().strip().upper()
+        start_row_text = template_start_row_var.get().strip()
+        if not name:
+            raise WorkbookError("模板名称不能为空")
+        if not re.fullmatch(r"[A-Z]+", number_column):
+            raise WorkbookError("编号列必须是列字母，例如 A")
+        try:
+            start_row = int(start_row_text)
+        except Exception as exc:
+            raise WorkbookError("起始行必须是整数") from exc
+        rules = []
+        for item in rules_tree.get_children():
+            field_name, main_range, table_b_cell, compare_type = [str(value) for value in rules_tree.item(item, "values")]
+            rules.append(
+                CheckRule(
+                    field_name=field_name,
+                    main_range=main_range,
+                    table_b_cell=table_b_cell,
+                    compare_type=compare_type,
+                )
+            )
+        template = CheckTemplate(name=name, number_column=number_column, start_row=start_row, rules=rules)
+        parse_check_template(template)
+        if not template.rules:
+            raise WorkbookError("模板至少需要一条规则")
+        return template
+
+    def save_template_action() -> None:
+        nonlocal templates_state, current_template_name
+        try:
+            template = current_form_template()
+        except Exception as exc:
+            messagebox.showerror("模板无效", str(exc))
+            return
+        templates_state = [item for item in templates_state if item.name not in {current_template_name, template.name}]
+        templates_state.append(template)
+        save_check_templates(templates_state)
+        current_template_name = template.name
+        refresh_template_choices(template.name)
+        load_template_to_form(template.name)
+        messagebox.showinfo("保存成功", f"已保存模板：{template.name}")
+
+    def delete_template_action() -> None:
+        nonlocal templates_state, current_template_name
+        selected = template_name_var.get().strip()
+        if not selected:
+            return
+        if selected == DEFAULT_CHECK_TEMPLATE_NAME:
+            messagebox.showerror("不能删除", "默认模板不能删除。")
+            return
+        if not messagebox.askyesno("确认删除", f"确定删除模板“{selected}”吗？"):
+            return
+        templates_state = [item for item in templates_state if item.name != selected]
+        save_check_templates(templates_state)
+        refresh_template_choices(DEFAULT_CHECK_TEMPLATE_NAME)
+        load_template_to_form(DEFAULT_CHECK_TEMPLATE_NAME)
+
+    def new_template_action() -> None:
+        nonlocal current_template_name
+        current_template_name = None
+        template_name_var.set("")
+        template_number_column_var.set("A")
+        template_start_row_var.set("7")
+        for item in rules_tree.get_children():
+            rules_tree.delete(item)
+
+    def add_rule_action() -> None:
+        result = open_rule_dialog()
+        if result:
+            rules_tree.insert("", "end", values=result)
+
+    def edit_rule_action() -> None:
+        values = selected_rule_values()
+        if values is None:
+            messagebox.showerror("未选择规则", "请先选择一条规则。")
+            return
+        result = open_rule_dialog(values)
+        if result:
+            selected = rules_tree.selection()[0]
+            rules_tree.item(selected, values=result)
+
+    def delete_rule_action() -> None:
+        selected = rules_tree.selection()
+        if not selected:
+            messagebox.showerror("未选择规则", "请先选择一条规则。")
+            return
+        rules_tree.delete(selected[0])
+
+    def move_rule_action(direction: int) -> None:
+        selected = rules_tree.selection()
+        if not selected:
+            messagebox.showerror("未选择规则", "请先选择一条规则。")
+            return
+        item = selected[0]
+        siblings = list(rules_tree.get_children())
+        index = siblings.index(item)
+        new_index = index + direction
+        if new_index < 0 or new_index >= len(siblings):
+            return
+        rules_tree.move(item, "", new_index)
+        rules_tree.selection_set(item)
+        rules_tree.focus(item)
+
+    def duplicate_template_action() -> None:
+        nonlocal current_template_name
+        try:
+            template = current_form_template()
+        except Exception as exc:
+            messagebox.showerror("模板无效", str(exc))
+            return
+        existing_names = set(template_names())
+        base_name = f"{template.name} - 副本"
+        new_name = base_name
+        index = 2
+        while new_name in existing_names:
+            new_name = f"{base_name} {index}"
+            index += 1
+        current_template_name = None
+        template_name_var.set(new_name)
+        messagebox.showinfo("已复制到当前表单", f"已创建模板副本名称：{new_name}\n点击“保存模板”后生效。")
+
+    def export_template_action() -> None:
+        try:
+            template = current_form_template()
+        except Exception as exc:
+            messagebox.showerror("模板无效", str(exc))
+            return
+        path = filedialog.asksaveasfilename(
+            title="导出模板",
+            defaultextension=".json",
+            initialfile=f"{template.name}.json",
+            filetypes=[("JSON 文件", "*.json")],
+        )
+        if not path:
+            return
+        Path(path).write_text(json.dumps(template_to_dict(template), ensure_ascii=False, indent=2), encoding="utf-8")
+        messagebox.showinfo("导出成功", f"模板已导出到：\n{path}")
+
+    def import_template_action() -> None:
+        nonlocal templates_state, current_template_name
+        path = filedialog.askopenfilename(
+            title="导入模板",
+            filetypes=[("JSON 文件", "*.json")],
+        )
+        if not path:
+            return
+        try:
+            raw = json.loads(Path(path).read_text(encoding="utf-8"))
+            imported: List[CheckTemplate] = []
+            if isinstance(raw, dict):
+                imported.append(check_template_from_dict(raw))
+            elif isinstance(raw, list):
+                for item in raw:
+                    if isinstance(item, dict):
+                        imported.append(check_template_from_dict(item))
+            if not imported:
+                raise WorkbookError("模板文件中没有可导入的模板")
+        except Exception as exc:
+            messagebox.showerror("导入失败", str(exc))
+            return
+
+        for template in imported:
+            templates_state = [item for item in templates_state if item.name != template.name]
+            templates_state.append(template)
+        save_check_templates(templates_state)
+        current_template_name = imported[-1].name
+        refresh_template_choices(current_template_name)
+        load_template_to_form(current_template_name)
+        messagebox.showinfo("导入成功", f"已导入 {len(imported)} 个模板。")
+
+    def on_template_select(_event=None) -> None:
+        selection = template_listbox.curselection()
+        if not selection:
+            return
+        load_template_to_form(template_listbox.get(selection[0]))
+
+    template_listbox.bind("<<ListboxSelect>>", on_template_select)
+
+    ttk.Label(template_right, text="模板名称").grid(row=0, column=0, sticky="w", pady=(0, 8))
+    ttk.Entry(template_right, textvariable=template_name_var).grid(row=0, column=1, sticky="ew", pady=(0, 8))
+
+    ttk.Label(template_right, text="编号列").grid(row=1, column=0, sticky="w", pady=(0, 8))
+    ttk.Entry(template_right, textvariable=template_number_column_var).grid(row=1, column=1, sticky="ew", pady=(0, 8))
+
+    ttk.Label(template_right, text="数据起始行").grid(row=2, column=0, sticky="w", pady=(0, 8))
+    ttk.Entry(template_right, textvariable=template_start_row_var).grid(row=2, column=1, sticky="ew", pady=(0, 8))
+
+    ttk.Label(template_right, text="规则").grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 6))
+    rules_tree.grid(row=4, column=0, columnspan=2, sticky="nsew")
+
+    rules_button_bar = ttk.Frame(template_right)
+    rules_button_bar.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 8))
+    ttk.Button(rules_button_bar, text="新增规则", command=add_rule_action).pack(side="left")
+    ttk.Button(rules_button_bar, text="编辑规则", command=edit_rule_action).pack(side="left", padx=(8, 0))
+    ttk.Button(rules_button_bar, text="删除规则", command=delete_rule_action).pack(side="left", padx=(8, 0))
+    ttk.Button(rules_button_bar, text="上移规则", command=lambda: move_rule_action(-1)).pack(side="left", padx=(8, 0))
+    ttk.Button(rules_button_bar, text="下移规则", command=lambda: move_rule_action(1)).pack(side="left", padx=(8, 0))
+
+    ttk.Label(
+        template_right,
+        text="规则格式示例：主表 F3-Fn 对应 考勤表 H4。比较类型可选 text / number / position。",
+    ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+    template_action_bar = ttk.Frame(template_right)
+    template_action_bar.grid(row=7, column=0, columnspan=2, sticky="ew")
+    ttk.Button(template_action_bar, text="新建模板", command=new_template_action).pack(side="left")
+    ttk.Button(template_action_bar, text="复制模板", command=duplicate_template_action).pack(side="left", padx=(8, 0))
+    ttk.Button(template_action_bar, text="保存模板", command=save_template_action).pack(side="left", padx=(8, 0))
+    ttk.Button(template_action_bar, text="删除模板", command=delete_template_action).pack(side="left", padx=(8, 0))
+    ttk.Button(template_action_bar, text="导入模板", command=import_template_action).pack(side="left", padx=(8, 0))
+    ttk.Button(template_action_bar, text="导出模板", command=export_template_action).pack(side="left", padx=(8, 0))
+
+    refresh_template_choices(DEFAULT_CHECK_TEMPLATE_NAME)
+    load_template_to_form(check_template_var.get() or DEFAULT_CHECK_TEMPLATE_NAME)
 
     root.mainloop()
 

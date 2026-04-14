@@ -1,0 +1,45 @@
+[
+  {
+    "name": "默认模板",
+    "number_column": "A",
+    "start_row": 7,
+    "rules": [
+      {
+        "field_name": "姓名",
+        "main_range": "F7-Fn",
+        "table_b_cell": "A3",
+        "compare_type": "text"
+      },
+      {
+        "field_name": "岗位",
+        "main_range": "J7-Jn",
+        "table_b_cell": "C3",
+        "compare_type": "position"
+      },
+      {
+        "field_name": "应支付天数",
+        "main_range": "N7-Nn",
+        "table_b_cell": "B6",
+        "compare_type": "number"
+      },
+      {
+        "field_name": "正常工作日加班",
+        "main_range": "W7-Wn",
+        "table_b_cell": "H9",
+        "compare_type": "number"
+      },
+      {
+        "field_name": "周末加班",
+        "main_range": "X7-Xn",
+        "table_b_cell": "I9",
+        "compare_type": "number"
+      },
+      {
+        "field_name": "法定假日加班",
+        "main_range": "Y7-Yn",
+        "table_b_cell": "J9",
+        "compare_type": "number"
+      }
+    ]
+  }
+]
