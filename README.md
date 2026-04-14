@@ -67,3 +67,40 @@ python excel_check_tool.py --table-a "主表.xlsx" --table-bs "考勤目录" --o
 
 - 当前支持 `.xlsx` 和 `.xlsm`
 - 不依赖第三方库，Windows 上直接用 Python 标准库运行
+
+## 根据表C生成表B
+
+脚本：
+
+- `generate_table_bs.py`
+
+用途：
+
+- 根据 `考勤表汇总.xlsx` 批量生成每个人的 `表B`
+- 保留现有表B模板中的格式、固定文本、图片、宏及素材
+- 当前做法是：复制一个现有表B作为模板，再把 `New timesheet` 工作表按表C内容静态填充
+
+示例：
+
+```bash
+python generate_table_bs.py --table-c "考勤表汇总.xlsx" --table-bs-dir "考勤表-编辑版"
+```
+
+也可以显式指定模板：
+
+```bash
+python generate_table_bs.py --table-c "考勤表汇总.xlsx" --template-b "考勤表-编辑版/1.Venkateshan Varatharajan Varatharajan-Job Performer.xlsm"
+```
+
+可选输出目录：
+
+```bash
+python generate_table_bs.py --table-c "考勤表汇总.xlsx" --table-bs-dir "考勤表-编辑版" --output-dir "生成后的表Bs"
+```
+
+当前默认假设：
+
+- `V` 年休假：计入可支付天数
+- `S` 病假：计入可支付天数
+- `E` 紧急休假：不计入可支付天数
+- `A` 缺勤：不计入可支付天数
