@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 import xml.etree.ElementTree as ET
 
+sys.modules.setdefault("excel_check_tool", sys.modules[__name__])
+
 
 MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -558,13 +560,32 @@ def launch_gui() -> None:
     from tkinter import filedialog, messagebox, ttk
 
     root = tk.Tk()
-    root.title("表格核对工具")
-    root.geometry("760x480")
+    root.title("表格工具")
+    root.geometry("860x620")
 
-    main = ttk.Frame(root, padding=16)
-    main.pack(fill="both", expand=True)
-    main.columnconfigure(1, weight=1)
-    main.rowconfigure(4, weight=1)
+    notebook = ttk.Notebook(root)
+    notebook.pack(fill="both", expand=True)
+
+    check_tab = ttk.Frame(notebook, padding=16)
+    generate_tab = ttk.Frame(notebook, padding=16)
+    notebook.add(check_tab, text="工资表核对")
+    notebook.add(generate_tab, text="根据表C生成表B")
+
+    for tab in (check_tab, generate_tab):
+        tab.columnconfigure(1, weight=1)
+    check_tab.rowconfigure(5, weight=1)
+    generate_tab.rowconfigure(7, weight=1)
+
+    def clear_log(widget: tk.Text) -> None:
+        widget.configure(state="normal")
+        widget.delete("1.0", "end")
+        widget.configure(state="disabled")
+
+    def append_log(widget: tk.Text, text: str) -> None:
+        widget.configure(state="normal")
+        widget.insert("end", text + "\n")
+        widget.see("end")
+        widget.configure(state="disabled")
 
     table_a_var = tk.StringVar()
     table_bs_var = tk.StringVar()
@@ -595,12 +616,6 @@ def launch_gui() -> None:
         if path:
             output_var.set(path)
 
-    def append_log(text: str) -> None:
-        log_text.configure(state="normal")
-        log_text.insert("end", text + "\n")
-        log_text.see("end")
-        log_text.configure(state="disabled")
-
     def start_check() -> None:
         table_a_text = table_a_var.get().strip()
         table_bs_text = table_bs_var.get().strip()
@@ -611,11 +626,9 @@ def launch_gui() -> None:
         if not table_bs_text:
             messagebox.showerror("缺少目录", "请选择考勤表目录。")
             return
-        start_button.configure(state="disabled")
-        log_text.configure(state="normal")
-        log_text.delete("1.0", "end")
-        log_text.configure(state="disabled")
-        append_log("开始核对...")
+        check_button.configure(state="disabled")
+        clear_log(check_log_text)
+        append_log(check_log_text, "开始核对...")
         try:
             output, report, mismatches, warnings = run_check(
                 table_a_path=Path(table_a_text),
@@ -623,38 +636,145 @@ def launch_gui() -> None:
                 output_path=Path(output_text) if output_text else None,
             )
         except Exception as exc:
-            append_log(f"失败: {exc}")
+            append_log(check_log_text, f"失败: {exc}")
             messagebox.showerror("执行失败", str(exc))
         else:
-            append_log(f"结果文件: {output}")
-            append_log(f"报告文件: {report}")
-            append_log(f"不一致数量: {len(mismatches)}")
+            append_log(check_log_text, f"结果文件: {output}")
+            append_log(check_log_text, f"报告文件: {report}")
+            append_log(check_log_text, f"不一致数量: {len(mismatches)}")
             for warning in warnings:
-                append_log(f"提示: {warning}")
+                append_log(check_log_text, f"提示: {warning}")
             messagebox.showinfo(
                 "核对完成",
                 f"已完成核对。\n\n结果文件:\n{output}\n\n报告文件:\n{report}\n\n不一致数量: {len(mismatches)}",
             )
         finally:
-            start_button.configure(state="normal")
+            check_button.configure(state="normal")
 
-    ttk.Label(main, text="主表").grid(row=0, column=0, sticky="w", pady=(0, 8))
-    ttk.Entry(main, textvariable=table_a_var).grid(row=0, column=1, sticky="ew", padx=(8, 8), pady=(0, 8))
-    ttk.Button(main, text="选择文件", command=choose_table_a).grid(row=0, column=2, sticky="ew", pady=(0, 8))
+    ttk.Label(check_tab, text="主表").grid(row=0, column=0, sticky="w", pady=(0, 8))
+    ttk.Entry(check_tab, textvariable=table_a_var).grid(row=0, column=1, sticky="ew", padx=(8, 8), pady=(0, 8))
+    ttk.Button(check_tab, text="选择文件", command=choose_table_a).grid(row=0, column=2, sticky="ew", pady=(0, 8))
 
-    ttk.Label(main, text="考勤表目录").grid(row=1, column=0, sticky="w", pady=(0, 8))
-    ttk.Entry(main, textvariable=table_bs_var).grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=(0, 8))
-    ttk.Button(main, text="选择目录", command=choose_table_bs).grid(row=1, column=2, sticky="ew", pady=(0, 8))
+    ttk.Label(check_tab, text="考勤表目录").grid(row=1, column=0, sticky="w", pady=(0, 8))
+    ttk.Entry(check_tab, textvariable=table_bs_var).grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=(0, 8))
+    ttk.Button(check_tab, text="选择目录", command=choose_table_bs).grid(row=1, column=2, sticky="ew", pady=(0, 8))
 
-    ttk.Label(main, text="输出文件").grid(row=2, column=0, sticky="w", pady=(0, 8))
-    ttk.Entry(main, textvariable=output_var).grid(row=2, column=1, sticky="ew", padx=(8, 8), pady=(0, 8))
-    ttk.Button(main, text="选择位置", command=choose_output).grid(row=2, column=2, sticky="ew", pady=(0, 8))
+    ttk.Label(check_tab, text="输出文件").grid(row=2, column=0, sticky="w", pady=(0, 8))
+    ttk.Entry(check_tab, textvariable=output_var).grid(row=2, column=1, sticky="ew", padx=(8, 8), pady=(0, 8))
+    ttk.Button(check_tab, text="选择位置", command=choose_output).grid(row=2, column=2, sticky="ew", pady=(0, 8))
 
-    start_button = ttk.Button(main, text="开始核对", command=start_check)
-    start_button.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(4, 12))
+    check_button = ttk.Button(check_tab, text="开始核对", command=start_check)
+    check_button.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(4, 8))
 
-    log_text = tk.Text(main, height=14, wrap="word", state="disabled")
-    log_text.grid(row=4, column=0, columnspan=3, sticky="nsew")
+    ttk.Label(check_tab, text="日志").grid(row=4, column=0, columnspan=3, sticky="w", pady=(0, 6))
+    check_log_text = tk.Text(check_tab, height=16, wrap="word", state="disabled")
+    check_log_text.grid(row=5, column=0, columnspan=3, sticky="nsew")
+
+    table_c_var = tk.StringVar()
+    template_b_var = tk.StringVar()
+    generate_table_bs_var = tk.StringVar()
+    generate_output_var = tk.StringVar()
+
+    def choose_table_c() -> None:
+        path = filedialog.askopenfilename(
+            title="选择表C",
+            filetypes=[("Excel 文件", "*.xlsx *.xlsm")],
+        )
+        if not path:
+            return
+        table_c_var.set(path)
+        if not generate_output_var.get():
+            generate_output_var.set(str(Path(path).with_name(f"{Path(path).stem}_生成表Bs")))
+
+    def choose_template_b() -> None:
+        path = filedialog.askopenfilename(
+            title="选择表B模板",
+            filetypes=[("Excel 文件", "*.xlsx *.xlsm")],
+        )
+        if path:
+            template_b_var.set(path)
+
+    def choose_generate_bs_dir() -> None:
+        path = filedialog.askdirectory(title="选择现有表B目录")
+        if path:
+            generate_table_bs_var.set(path)
+
+    def choose_generate_output_dir() -> None:
+        path = filedialog.askdirectory(title="选择输出目录")
+        if path:
+            generate_output_var.set(path)
+
+    def start_generate() -> None:
+        from generate_table_bs import choose_template_file, run_generate
+
+        table_c_text = table_c_var.get().strip()
+        template_b_text = template_b_var.get().strip()
+        table_bs_dir_text = generate_table_bs_var.get().strip()
+        output_dir_text = generate_output_var.get().strip()
+
+        if not table_c_text:
+            messagebox.showerror("缺少表C", "请选择表C文件。")
+            return
+        if not template_b_text and not table_bs_dir_text:
+            messagebox.showerror("缺少模板", "请选择表B模板，或选择现有表B目录。")
+            return
+
+        generate_button.configure(state="disabled")
+        clear_log(generate_log_text)
+        append_log(generate_log_text, "开始生成表B...")
+        try:
+            template_path = choose_template_file(template_b_text or None, table_bs_dir_text or None)
+            append_log(generate_log_text, f"使用模板: {template_path}")
+            output_dir, generated_files, report_path = run_generate(
+                table_c_path=Path(table_c_text),
+                template_b_path=template_path,
+                output_dir=Path(output_dir_text) if output_dir_text else None,
+            )
+        except Exception as exc:
+            append_log(generate_log_text, f"失败: {exc}")
+            messagebox.showerror("执行失败", str(exc))
+        else:
+            append_log(generate_log_text, f"输出目录: {output_dir}")
+            append_log(generate_log_text, f"生成数量: {len(generated_files)}")
+            append_log(generate_log_text, f"说明文件: {report_path}")
+            for generated_file in generated_files[:10]:
+                append_log(generate_log_text, f"已生成: {generated_file.name}")
+            if len(generated_files) > 10:
+                append_log(generate_log_text, f"...其余 {len(generated_files) - 10} 个文件已省略显示")
+            messagebox.showinfo(
+                "生成完成",
+                f"已完成生成。\n\n输出目录:\n{output_dir}\n\n生成数量: {len(generated_files)}\n\n说明文件:\n{report_path}",
+            )
+        finally:
+            generate_button.configure(state="normal")
+
+    ttk.Label(generate_tab, text="表C").grid(row=0, column=0, sticky="w", pady=(0, 8))
+    ttk.Entry(generate_tab, textvariable=table_c_var).grid(row=0, column=1, sticky="ew", padx=(8, 8), pady=(0, 8))
+    ttk.Button(generate_tab, text="选择文件", command=choose_table_c).grid(row=0, column=2, sticky="ew", pady=(0, 8))
+
+    ttk.Label(generate_tab, text="表B模板").grid(row=1, column=0, sticky="w", pady=(0, 8))
+    ttk.Entry(generate_tab, textvariable=template_b_var).grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=(0, 8))
+    ttk.Button(generate_tab, text="选择模板", command=choose_template_b).grid(row=1, column=2, sticky="ew", pady=(0, 8))
+
+    ttk.Label(generate_tab, text="现有表B目录").grid(row=2, column=0, sticky="w", pady=(0, 8))
+    ttk.Entry(generate_tab, textvariable=generate_table_bs_var).grid(row=2, column=1, sticky="ew", padx=(8, 8), pady=(0, 8))
+    ttk.Button(generate_tab, text="选择目录", command=choose_generate_bs_dir).grid(row=2, column=2, sticky="ew", pady=(0, 8))
+
+    ttk.Label(generate_tab, text="输出目录").grid(row=3, column=0, sticky="w", pady=(0, 8))
+    ttk.Entry(generate_tab, textvariable=generate_output_var).grid(row=3, column=1, sticky="ew", padx=(8, 8), pady=(0, 8))
+    ttk.Button(generate_tab, text="选择目录", command=choose_generate_output_dir).grid(row=3, column=2, sticky="ew", pady=(0, 8))
+
+    ttk.Label(
+        generate_tab,
+        text="说明：优先使用“表B模板”；如果不填模板，就会从“现有表B目录”里自动挑一个可用文件做模板。",
+    ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(0, 8))
+
+    generate_button = ttk.Button(generate_tab, text="开始生成表B", command=start_generate)
+    generate_button.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+
+    ttk.Label(generate_tab, text="日志").grid(row=6, column=0, columnspan=3, sticky="w", pady=(0, 6))
+    generate_log_text = tk.Text(generate_tab, height=14, wrap="word", state="disabled")
+    generate_log_text.grid(row=7, column=0, columnspan=3, sticky="nsew")
 
     root.mainloop()
 
