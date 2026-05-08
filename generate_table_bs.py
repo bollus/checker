@@ -211,10 +211,12 @@ def parse_summary_value(raw_value: Optional[str]) -> Tuple[str, Optional[Decimal
 class SummaryEmployee:
     row_num: int
     no: int
+    employee_no: str
     name: str
     project: str
     company: str
     passport: str
+    crew_group: str
     position: str
     joining_date: Optional[str]
     days: Dict[int, Tuple[str, Optional[Decimal]]]
@@ -247,10 +249,12 @@ def read_summary(summary_path: Path) -> Tuple[SpreadsheetZip, WorkbookSheet, Lis
             SummaryEmployee(
                 row_num=row_num,
                 no=no_value,
+                employee_no=(summary_sheet.get_value(f"B{row_num}") or "").strip(),
                 name=name,
                 project=(summary_sheet.get_value(f"D{row_num}") or "").strip(),
                 company=(summary_sheet.get_value(f"E{row_num}") or "").strip(),
                 passport=(summary_sheet.get_value(f"F{row_num}") or "").strip(),
+                crew_group=(summary_sheet.get_value(f"G{row_num}") or "").strip(),
                 position=position,
                 joining_date=summary_sheet.get_value(f"I{row_num}"),
                 days=days,
@@ -403,6 +407,8 @@ def write_employee_workbook(
     set_cell_text(main_sheet, "C3", employee.position)
     set_cell_text(main_sheet, "E3", employee.passport)
     set_cell_text(main_sheet, "G3", employee.project)
+    set_cell_text(main_sheet, "I3", employee.crew_group)
+    set_cell_text(main_sheet, "J3", employee.employee_no)
     set_cell_text(main_sheet, "N7", rest_weekday)
     set_cell_number(main_sheet, "N8", HOURS_PER_DAY)
 
