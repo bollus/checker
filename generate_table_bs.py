@@ -838,7 +838,9 @@ def write_employee_workbook(
     vacation_day_count = Decimal(vacation_days)
     sick_day_count = Decimal(0 if count_holidays else sick_days)
     rest_day_count = Decimal(rest_attendance if count_holidays else rest_payable)
-    payable_day_count = work_day_count + public_day_count + vacation_day_count + sick_day_count + rest_day_count
+    payable_day_count = work_day_count + public_day_count + sick_day_count + rest_day_count
+    if not count_holidays:
+        payable_day_count += vacation_day_count
 
     set_cell_number(main_sheet, "A6", len(day_headers))
     set_cell_number(main_sheet, "B6", payable_day_count if payable_day_count > 0 else None)
