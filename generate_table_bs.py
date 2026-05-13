@@ -163,24 +163,33 @@ def render_signature_png(signature: str, signature_scale: int = 100) -> bytes:
     if not font_path.exists():
         raise WorkbookError(f"缺少签名字体文件: {font_path}")
 
-    image = Image.new("RGBA", (SIGNATURE_MEDIA_WIDTH, SIGNATURE_MEDIA_HEIGHT), (255, 255, 255, 0))
-    draw = ImageDraw.Draw(image)
     scale = validate_signature_scale(signature_scale)
     width_ratio = min(0.98, 0.9 * scale / 100)
     height_ratio = min(0.9, 0.72 * scale / 100)
-    font_size = 220
-    while font_size >= 24:
-        font = ImageFont.truetype(str(font_path), font_size)
-        bbox = draw.textbbox((0, 0), signature, font=font)
-        text_width = bbox[2] - bbox[0]
-        text_height = bbox[3] - bbox[1]
-        if text_width <= SIGNATURE_MEDIA_WIDTH * width_ratio and text_height <= SIGNATURE_MEDIA_HEIGHT * height_ratio:
-            break
-        font_size -= 4
+    font = ImageFont.truetype(str(font_path), int(150 * scale / 100))
+    measure = Image.new("RGBA", (1, 1), (255, 255, 255, 0))
+    measure_draw = ImageDraw.Draw(measure)
+    bbox = measure_draw.textbbox((0, 0), signature, font=font)
+    text_width = max(1, bbox[2] - bbox[0])
+    text_height = max(1, bbox[3] - bbox[1])
+    padding = max(24, int(40 * scale / 100))
 
-    x = (SIGNATURE_MEDIA_WIDTH - text_width) / 2 - bbox[0]
-    y = (SIGNATURE_MEDIA_HEIGHT - text_height) / 2 - bbox[1] + SIGNATURE_MEDIA_HEIGHT * 0.04
-    draw.text((x, y), signature, fill=(20, 20, 20, 245), font=font)
+    text_image = Image.new("RGBA", (text_width + padding * 2, text_height + padding * 2), (255, 255, 255, 0))
+    text_draw = ImageDraw.Draw(text_image)
+    text_draw.text((padding - bbox[0], padding - bbox[1]), signature, fill=(20, 20, 20, 245), font=font)
+
+    max_width = int(SIGNATURE_MEDIA_WIDTH * width_ratio)
+    max_height = int(SIGNATURE_MEDIA_HEIGHT * height_ratio)
+    resize_ratio = min(max_width / text_image.width, max_height / text_image.height, 1)
+    resized = text_image.resize(
+        (max(1, int(text_image.width * resize_ratio)), max(1, int(text_image.height * resize_ratio))),
+        Image.Resampling.LANCZOS,
+    )
+
+    image = Image.new("RGBA", (SIGNATURE_MEDIA_WIDTH, SIGNATURE_MEDIA_HEIGHT), (255, 255, 255, 0))
+    x = (SIGNATURE_MEDIA_WIDTH - resized.width) // 2
+    y = (SIGNATURE_MEDIA_HEIGHT - resized.height) // 2 + int(SIGNATURE_MEDIA_HEIGHT * 0.04)
+    image.alpha_composite(resized, (x, y))
     output = io.BytesIO()
     image.save(output, format="PNG")
     return output.getvalue()
