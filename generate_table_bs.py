@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import re
 import zipfile
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 import xml.etree.ElementTree as ET
 
 from excel_check_tool import (
@@ -33,6 +34,8 @@ LEAVE_LABELS = {
     "S": "Sick Leave",
     "V": "Vacation",
 }
+SIGNATURE_FONT_NAME = "Nothing You Could Do"
+SIGNATURE_FONT_SIZE = "22"
 
 
 def col_to_num(col: str) -> int:
@@ -112,6 +115,76 @@ def set_cell_text(sheet: SheetXml, cell_ref: str, value: Optional[str]) -> None:
     is_node = ET.SubElement(cell, qn("is"))
     text_node = ET.SubElement(is_node, qn("t"))
     text_node.text = value
+
+
+def signature_text(employee_name: str) -> str:
+    parts = [part for part in re.split(r"\s+", employee_name.strip()) if part]
+    return " ".join(parts[:2]) if len(parts) >= 2 else " ".join(parts)
+
+
+def ensure_signature_style(styles_root: ET.Element) -> Callable[[int], int]:
+    fonts = styles_root.find(qn("fonts"))
+    cell_xfs = styles_root.find(qn("cellXfs"))
+    if fonts is None or cell_xfs is None:
+        raise WorkbookError("styles.xml is missing fonts or cellXfs")
+
+    def font_name(font: ET.Element) -> str:
+        name = font.find(qn("name"))
+        return name.attrib.get("val", "") if name is not None else ""
+
+    signature_font_id: Optional[int] = None
+    for index, font in enumerate(list(fonts)):
+        if font_name(font).casefold() == SIGNATURE_FONT_NAME.casefold():
+            signature_font_id = index
+            break
+
+    style_cache: Dict[int, int] = {}
+
+    def style_for(base_style: int) -> int:
+        nonlocal signature_font_id
+        if base_style in style_cache:
+            return style_cache[base_style]
+
+        all_xfs = list(cell_xfs)
+        if base_style >= len(all_xfs):
+            base_style = 0
+        base_xf = all_xfs[base_style]
+
+        if signature_font_id is None:
+            all_fonts = list(fonts)
+            base_font_id = int(base_xf.attrib.get("fontId", "0"))
+            if base_font_id >= len(all_fonts):
+                base_font_id = 0
+            new_font = copy.deepcopy(all_fonts[base_font_id])
+            for old_name in list(new_font.findall(qn("name"))):
+                new_font.remove(old_name)
+            new_font.insert(0, ET.Element(qn("name"), {"val": SIGNATURE_FONT_NAME}))
+            size = new_font.find(qn("sz"))
+            if size is None:
+                size = ET.Element(qn("sz"))
+                new_font.insert(0, size)
+            size.attrib["val"] = SIGNATURE_FONT_SIZE
+            fonts.append(new_font)
+            signature_font_id = len(list(fonts)) - 1
+            fonts.attrib["count"] = str(len(list(fonts)))
+
+        new_xf = copy.deepcopy(base_xf)
+        new_xf.attrib["fontId"] = str(signature_font_id)
+        new_xf.attrib["applyFont"] = "1"
+        cell_xfs.append(new_xf)
+        new_index = len(list(cell_xfs)) - 1
+        cell_xfs.attrib["count"] = str(len(list(cell_xfs)))
+        style_cache[base_style] = new_index
+        return new_index
+
+    return style_for
+
+
+def set_signature_cell(sheet: SheetXml, cell_ref: str, value: str, signature_style_for: Callable[[int], int]) -> None:
+    set_cell_text(sheet, cell_ref, value)
+    cell = sheet.ensure_cell(cell_ref)
+    base_style = int(cell.attrib.get("s", "0"))
+    cell.attrib["s"] = str(signature_style_for(base_style))
 
 
 def set_calc_flags(book_root: ET.Element) -> None:
@@ -356,12 +429,18 @@ def fill_row(
     return payable, work_hours, work_ot, rest_hours, holiday_hours
 
 
-def update_overtime_sheet(overtime_sheet: Optional[SheetXml], employee: SummaryEmployee) -> None:
+def update_overtime_sheet(
+    overtime_sheet: Optional[SheetXml],
+    employee: SummaryEmployee,
+    signature: str,
+    signature_style_for: Callable[[int], int],
+) -> None:
     if overtime_sheet is None:
         return
     set_cell_text(overtime_sheet, "B5", employee.name)
     set_cell_text(overtime_sheet, "B7", employee.project)
     set_cell_text(overtime_sheet, "I7", employee.position)
+    set_signature_cell(overtime_sheet, "E53", signature, signature_style_for)
 
 
 def choose_template_sheet(sheets: List[WorkbookSheet], sheet_name: str) -> Optional[WorkbookSheet]:
@@ -376,9 +455,12 @@ def write_employee_workbook(
     employee: SummaryEmployee,
     day_headers: List[Tuple[str, int, str]],
     output_dir: Path,
+    count_holidays: bool = False,
 ) -> Path:
     book = SpreadsheetZip(template_path)
     workbook_root = book.load_xml("xl/workbook.xml")
+    styles_root = book.load_xml("xl/styles.xml")
+    signature_style_for = ensure_signature_style(styles_root)
     sheets = workbook_sheets(book)
     main_sheet_info = choose_template_sheet(sheets, "New timesheet") or sheets[0]
     overtime_sheet_info = choose_template_sheet(sheets, "Overtime")
@@ -411,6 +493,8 @@ def write_employee_workbook(
     set_cell_text(main_sheet, "J3", employee.employee_no)
     set_cell_text(main_sheet, "N7", rest_weekday)
     set_cell_number(main_sheet, "N8", HOURS_PER_DAY)
+    signature = signature_text(employee.name)
+    set_signature_cell(main_sheet, "A42", signature, signature_style_for)
 
     for row in range(50, 71):
         set_cell_number(main_sheet, f"J{row}", None)
@@ -485,7 +569,15 @@ def write_employee_workbook(
 
     public_payable = 0
     rest_payable = 0
+    public_attendance = 0
+    rest_attendance = 0
     for _, day_number, kind in day_headers:
+        entry_type, total_hours = employee.days.get(day_number, ("blank", None))
+        attended = entry_type == "hours" and total_hours is not None and total_hours > 0
+        if kind == "holiday" and attended:
+            public_attendance += 1
+        if kind == "rest" and attended:
+            rest_attendance += 1
         if kind == "holiday" and main_sheet.get_value(f"T{9 + day_number}") not in (None, ""):
             public_payable += 1
         if kind == "rest" and main_sheet.get_value(f"T{9 + day_number}") not in (None, ""):
@@ -498,22 +590,23 @@ def write_employee_workbook(
         "E6",
         (work_sum / HOURS_PER_DAY).to_integral_value(rounding=ROUND_CEILING) if work_sum > 0 else None,
     )
-    set_cell_number(main_sheet, "I6", public_payable if public_payable > 0 else None)
+    set_cell_number(main_sheet, "I6", public_attendance if count_holidays else (public_payable if public_payable > 0 else None))
     set_cell_number(main_sheet, "J6", vacation_days if vacation_days > 0 else None)
-    set_cell_number(main_sheet, "K6", sick_days if sick_days > 0 else None)
-    set_cell_number(main_sheet, "L6", rest_payable if rest_payable > 0 else None)
-    set_cell_number(main_sheet, "M6", emergency_days if emergency_days > 0 else None)
+    set_cell_number(main_sheet, "K6", 0 if count_holidays else (sick_days if sick_days > 0 else None))
+    set_cell_number(main_sheet, "L6", rest_attendance if count_holidays else (rest_payable if rest_payable > 0 else None))
+    set_cell_number(main_sheet, "M6", 0 if count_holidays else (emergency_days if emergency_days > 0 else None))
     set_cell_number(main_sheet, "H9", work_ot_sum if work_ot_sum > 0 else None)
     set_cell_number(main_sheet, "I9", rest_ot_sum if rest_ot_sum > 0 else None)
     set_cell_number(main_sheet, "J9", holiday_ot_sum if holiday_ot_sum > 0 else None)
 
-    update_overtime_sheet(overtime_sheet, employee)
+    update_overtime_sheet(overtime_sheet, employee, signature, signature_style_for)
     set_calc_flags(workbook_root)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / build_output_name(employee, template_path.suffix)
     replacements = {
         "xl/workbook.xml": ET.tostring(workbook_root, encoding="utf-8", xml_declaration=True),
+        "xl/styles.xml": ET.tostring(styles_root, encoding="utf-8", xml_declaration=True),
         main_sheet_info.part_name: ET.tostring(main_sheet.root, encoding="utf-8", xml_declaration=True),
     }
     if overtime_sheet_info is not None:
@@ -549,10 +642,11 @@ def next_output_dir(summary_path: Path) -> Path:
     return summary_path.with_name(f"{summary_path.stem}_生成表Bs")
 
 
-def create_generation_report(report_path: Path, generated_files: List[Path], template_path: Path) -> None:
+def create_generation_report(report_path: Path, generated_files: List[Path], template_path: Path, count_holidays: bool) -> None:
     lines = [
         f"模板表B: {template_path}",
         f"生成数量: {len(generated_files)}",
+        f"是否统计假期: {'是' if count_holidays else '否'}",
         "默认规则:",
         "- V(年休假) 计入可支付天数",
         "- S(病假) 计入可支付天数",
@@ -569,14 +663,15 @@ def run_generate(
     table_c_path: Path,
     template_b_path: Path,
     output_dir: Optional[Path] = None,
+    count_holidays: bool = False,
 ) -> Tuple[Path, List[Path], Path]:
     _, _, day_headers, employees = read_summary(table_c_path)
     output = output_dir or next_output_dir(table_c_path)
     generated_files: List[Path] = []
     for employee in employees:
-        generated_files.append(write_employee_workbook(template_b_path, employee, day_headers, output))
+        generated_files.append(write_employee_workbook(template_b_path, employee, day_headers, output, count_holidays=count_holidays))
     report_path = output / "生成说明.txt"
-    create_generation_report(report_path, generated_files, template_b_path)
+    create_generation_report(report_path, generated_files, template_b_path, count_holidays)
     return output, generated_files, report_path
 
 
@@ -586,6 +681,7 @@ def cli() -> int:
     parser.add_argument("--template-b", help="单个表B模板路径(.xlsm/.xlsx)")
     parser.add_argument("--table-bs-dir", help="现有表B目录；未指定模板时会自动取第一个文件做模板")
     parser.add_argument("--output-dir", help="输出目录")
+    parser.add_argument("--count-holidays", action="store_true", help="按实际出勤统计 I6 法定假和 L6 周末假，并将 K6/M6 写为 0")
     args = parser.parse_args()
 
     template_path = choose_template_file(args.template_b, args.table_bs_dir)
@@ -593,6 +689,7 @@ def cli() -> int:
         table_c_path=Path(args.table_c),
         template_b_path=template_path,
         output_dir=Path(args.output_dir) if args.output_dir else None,
+        count_holidays=args.count_holidays,
     )
     print(f"输出目录: {output_dir}")
     print(f"生成数量: {len(generated_files)}")

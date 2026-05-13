@@ -929,7 +929,7 @@ def launch_gui() -> None:
     for tab in (check_tab, generate_tab, template_tab):
         tab.columnconfigure(1, weight=1)
     check_tab.rowconfigure(7, weight=1)
-    generate_tab.rowconfigure(7, weight=1)
+    generate_tab.rowconfigure(8, weight=1)
     template_tab.columnconfigure(1, weight=1)
     template_tab.rowconfigure(0, weight=1)
 
@@ -1067,6 +1067,7 @@ def launch_gui() -> None:
     template_b_var = tk.StringVar()
     generate_table_bs_var = tk.StringVar()
     generate_output_var = tk.StringVar()
+    count_holidays_var = tk.BooleanVar(value=False)
 
     def choose_table_c() -> None:
         path = filedialog.askopenfilename(
@@ -1122,6 +1123,7 @@ def launch_gui() -> None:
                 table_c_path=Path(table_c_text),
                 template_b_path=template_path,
                 output_dir=Path(output_dir_text) if output_dir_text else None,
+                count_holidays=count_holidays_var.get(),
             )
         except Exception as exc:
             append_log(generate_log_text, f"失败: {exc}")
@@ -1162,12 +1164,18 @@ def launch_gui() -> None:
         text="说明：优先使用“考勤表模板”；如果不填模板，就会从“现有考勤表目录”里自动挑一个可用文件做模板。",
     ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(0, 8))
 
-    generate_button = ttk.Button(generate_tab, text="开始生成考勤表", command=start_generate)
-    generate_button.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+    ttk.Checkbutton(
+        generate_tab,
+        text="统计假期",
+        variable=count_holidays_var,
+    ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(0, 8))
 
-    ttk.Label(generate_tab, text="日志").grid(row=6, column=0, columnspan=3, sticky="w", pady=(0, 6))
+    generate_button = ttk.Button(generate_tab, text="开始生成考勤表", command=start_generate)
+    generate_button.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+
+    ttk.Label(generate_tab, text="日志").grid(row=7, column=0, columnspan=3, sticky="w", pady=(0, 6))
     generate_log_text = tk.Text(generate_tab, height=14, wrap="word", state="disabled")
-    generate_log_text.grid(row=7, column=0, columnspan=3, sticky="nsew")
+    generate_log_text.grid(row=8, column=0, columnspan=3, sticky="nsew")
 
     template_left = ttk.Frame(template_tab)
     template_right = ttk.Frame(template_tab)
