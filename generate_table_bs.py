@@ -271,8 +271,10 @@ def apply_signature_to_drawing(
     fallback_anchor: Tuple[int, int, int, int],
 ) -> None:
     rels_part = f"{posixpath.dirname(drawing_part)}/_rels/{posixpath.basename(drawing_part)}.rels"
-    drawing_root = ET.fromstring(replacements.get(drawing_part, book.raw_entries[drawing_part]))
-    rels_root = ET.fromstring(replacements.get(rels_part, book.raw_entries[rels_part]))
+    drawing_data = replacements[drawing_part] if drawing_part in replacements else book.raw_entries[drawing_part]
+    rels_data = replacements[rels_part] if rels_part in replacements else book.raw_entries[rels_part]
+    drawing_root = ET.fromstring(drawing_data)
+    rels_root = ET.fromstring(rels_data)
 
     removed_anchor: Optional[ET.Element] = None
     min_col, min_row, max_col, max_row = target_range
@@ -322,6 +324,23 @@ def ensure_png_content_type(book: SpreadsheetZip, replacements: Dict[str, bytes]
         if default.attrib.get("Extension", "").lower() == "png":
             return
     ET.SubElement(root, content_type_tag("Default"), {"Extension": "png", "ContentType": "image/png"})
+    replacements["[Content_Types].xml"] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+def ensure_drawing_content_type(book: SpreadsheetZip, replacements: Dict[str, bytes], drawing_part: str) -> None:
+    root = ET.fromstring(replacements.get("[Content_Types].xml", book.raw_entries["[Content_Types].xml"]))
+    part_name = f"/{drawing_part}"
+    for override in root.findall(content_type_tag("Override")):
+        if override.attrib.get("PartName") == part_name:
+            return
+    ET.SubElement(
+        root,
+        content_type_tag("Override"),
+        {
+            "PartName": part_name,
+            "ContentType": "application/vnd.openxmlformats-officedocument.drawing+xml",
+        },
+    )
     replacements["[Content_Types].xml"] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
@@ -594,6 +613,63 @@ def sheet_drawing_part(book: SpreadsheetZip, sheet_part: str, sheet: SheetXml) -
     return None
 
 
+def next_drawing_part(book: SpreadsheetZip, replacements: Dict[str, bytes]) -> str:
+    used_numbers = set()
+    for filename in set(book.raw_entries) | set(replacements):
+        match = re.fullmatch(r"xl/drawings/drawing(\d+)\.xml", filename)
+        if match:
+            used_numbers.add(int(match.group(1)))
+    number = 1
+    while number in used_numbers:
+        number += 1
+    return f"xl/drawings/drawing{number}.xml"
+
+
+def ensure_relationships_root(book: SpreadsheetZip, replacements: Dict[str, bytes], rels_part: str) -> ET.Element:
+    if rels_part in replacements:
+        return ET.fromstring(replacements[rels_part])
+    if rels_part in book.raw_entries:
+        return book.load_xml(rels_part)
+    return ET.Element(rel_tag("Relationships"))
+
+
+def ensure_sheet_drawing_part(
+    book: SpreadsheetZip,
+    replacements: Dict[str, bytes],
+    sheet_info: WorkbookSheet,
+) -> str:
+    existing = sheet_drawing_part(book, sheet_info.part_name, sheet_info.sheet)
+    if existing is not None:
+        return existing
+
+    drawing_part = next_drawing_part(book, replacements)
+    sheet_rels_part = f"{posixpath.dirname(sheet_info.part_name)}/_rels/{posixpath.basename(sheet_info.part_name)}.rels"
+    sheet_rels_root = ensure_relationships_root(book, replacements, sheet_rels_part)
+    rel_id = next_relationship_id(sheet_rels_root)
+    target = posixpath.relpath(drawing_part, posixpath.dirname(sheet_info.part_name))
+    ET.SubElement(
+        sheet_rels_root,
+        rel_tag("Relationship"),
+        {
+            "Id": rel_id,
+            "Type": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing",
+            "Target": target,
+        },
+    )
+    ET.SubElement(sheet_info.sheet.root, qn("drawing"), {relationship_id("id"): rel_id})
+
+    drawing_root = ET.Element(xdr("wsDr"))
+    drawing_rels_part = f"{posixpath.dirname(drawing_part)}/_rels/{posixpath.basename(drawing_part)}.rels"
+    drawing_rels_root = ET.Element(rel_tag("Relationships"))
+
+    replacements[sheet_info.part_name] = ET.tostring(sheet_info.sheet.root, encoding="utf-8", xml_declaration=True)
+    replacements[sheet_rels_part] = ET.tostring(sheet_rels_root, encoding="utf-8", xml_declaration=True)
+    replacements[drawing_part] = ET.tostring(drawing_root, encoding="utf-8", xml_declaration=True)
+    replacements[drawing_rels_part] = ET.tostring(drawing_rels_root, encoding="utf-8", xml_declaration=True)
+    ensure_drawing_content_type(book, replacements, drawing_part)
+    return drawing_part
+
+
 def choose_template_sheet(sheets: List[WorkbookSheet], sheet_name: str) -> Optional[WorkbookSheet]:
     for sheet in sheets:
         if sheet.display_name == sheet_name:
@@ -741,11 +817,11 @@ def write_employee_workbook(
     set_cell_number(main_sheet, "A6", len(day_headers))
     set_cell_number(main_sheet, "B6", payable_day_count if payable_day_count > 0 else None)
     set_cell_number(main_sheet, "E6", work_day_count if work_day_count > 0 else None)
-    set_cell_number(main_sheet, "I6", public_day_count if count_holidays else (public_day_count if public_day_count > 0 else None))
+    set_cell_number(main_sheet, "I6", public_day_count if public_day_count > 0 else None)
     set_cell_number(main_sheet, "J6", vacation_days if vacation_days > 0 else None)
-    set_cell_number(main_sheet, "K6", sick_day_count if count_holidays else (sick_day_count if sick_day_count > 0 else None))
-    set_cell_number(main_sheet, "L6", rest_day_count if count_holidays else (rest_day_count if rest_day_count > 0 else None))
-    set_cell_number(main_sheet, "M6", 0 if count_holidays else (emergency_days if emergency_days > 0 else None))
+    set_cell_number(main_sheet, "K6", sick_day_count if sick_day_count > 0 else None)
+    set_cell_number(main_sheet, "L6", rest_day_count if rest_day_count > 0 else None)
+    set_cell_number(main_sheet, "M6", None if count_holidays else (emergency_days if emergency_days > 0 else None))
     set_cell_number(main_sheet, "H9", work_ot_sum if work_ot_sum > 0 else None)
     set_cell_number(main_sheet, "I9", rest_ot_sum if rest_ot_sum > 0 else None)
     set_cell_number(main_sheet, "J9", holiday_ot_sum if holiday_ot_sum > 0 else None)
@@ -764,27 +840,25 @@ def write_employee_workbook(
     ensure_png_content_type(book, replacements)
     if overtime_sheet_info is not None:
         replacements[overtime_sheet_info.part_name] = ET.tostring(overtime_sheet.root, encoding="utf-8", xml_declaration=True)
-    main_drawing_part = sheet_drawing_part(book, main_sheet_info.part_name, main_sheet)
-    if main_drawing_part is not None:
+    main_drawing_part = ensure_sheet_drawing_part(book, replacements, main_sheet_info)
+    apply_signature_to_drawing(
+        book,
+        replacements,
+        main_drawing_part,
+        signature_media_path,
+        target_range=(0, 41, 6, 43),
+        fallback_anchor=(1, 41, 3, 43),
+    )
+    if overtime_sheet_info is not None and overtime_sheet is not None:
+        overtime_drawing_part = ensure_sheet_drawing_part(book, replacements, overtime_sheet_info)
         apply_signature_to_drawing(
             book,
             replacements,
-            main_drawing_part,
+            overtime_drawing_part,
             signature_media_path,
-            target_range=(0, 41, 6, 43),
-            fallback_anchor=(1, 41, 3, 43),
+            target_range=(4, 52, 9, 52),
+            fallback_anchor=(7, 51, 8, 53),
         )
-    if overtime_sheet_info is not None and overtime_sheet is not None:
-        overtime_drawing_part = sheet_drawing_part(book, overtime_sheet_info.part_name, overtime_sheet)
-        if overtime_drawing_part is not None:
-            apply_signature_to_drawing(
-                book,
-                replacements,
-                overtime_drawing_part,
-                signature_media_path,
-                target_range=(4, 52, 9, 52),
-                fallback_anchor=(7, 51, 8, 53),
-            )
     book.save(output_path, replacements)
     return output_path
 
