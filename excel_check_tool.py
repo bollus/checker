@@ -1171,7 +1171,7 @@ def launch_gui() -> None:
 
     ttk.Checkbutton(
         generate_tab,
-        text="统计假期",
+        text="统计假期 (外包勾选)",
         variable=count_holidays_var,
     ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(0, 8))
 

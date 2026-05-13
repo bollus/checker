@@ -732,17 +732,19 @@ def write_employee_workbook(
         if kind == "rest" and main_sheet.get_value(f"T{9 + day_number}") not in (None, ""):
             rest_payable += 1
 
+    work_day_count = (work_sum / HOURS_PER_DAY).to_integral_value(rounding=ROUND_CEILING) if work_sum > 0 else Decimal("0")
+    public_day_count = Decimal(public_attendance if count_holidays else public_payable)
+    sick_day_count = Decimal(0 if count_holidays else sick_days)
+    rest_day_count = Decimal(rest_attendance if count_holidays else rest_payable)
+    payable_day_count = work_day_count + public_day_count + sick_day_count + rest_day_count
+
     set_cell_number(main_sheet, "A6", len(day_headers))
-    set_cell_number(main_sheet, "B6", payable_total if payable_total > 0 else None)
-    set_cell_number(
-        main_sheet,
-        "E6",
-        (work_sum / HOURS_PER_DAY).to_integral_value(rounding=ROUND_CEILING) if work_sum > 0 else None,
-    )
-    set_cell_number(main_sheet, "I6", public_attendance if count_holidays else (public_payable if public_payable > 0 else None))
+    set_cell_number(main_sheet, "B6", payable_day_count if payable_day_count > 0 else None)
+    set_cell_number(main_sheet, "E6", work_day_count if work_day_count > 0 else None)
+    set_cell_number(main_sheet, "I6", public_day_count if count_holidays else (public_day_count if public_day_count > 0 else None))
     set_cell_number(main_sheet, "J6", vacation_days if vacation_days > 0 else None)
-    set_cell_number(main_sheet, "K6", 0 if count_holidays else (sick_days if sick_days > 0 else None))
-    set_cell_number(main_sheet, "L6", rest_attendance if count_holidays else (rest_payable if rest_payable > 0 else None))
+    set_cell_number(main_sheet, "K6", sick_day_count if count_holidays else (sick_day_count if sick_day_count > 0 else None))
+    set_cell_number(main_sheet, "L6", rest_day_count if count_holidays else (rest_day_count if rest_day_count > 0 else None))
     set_cell_number(main_sheet, "M6", 0 if count_holidays else (emergency_days if emergency_days > 0 else None))
     set_cell_number(main_sheet, "H9", work_ot_sum if work_ot_sum > 0 else None)
     set_cell_number(main_sheet, "I9", rest_ot_sum if rest_ot_sum > 0 else None)
