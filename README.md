@@ -142,7 +142,7 @@ python generate_table_bs.py --table-c "考勤表汇总.xlsx" --table-bs-dir "考
 统计假期：
 
 - GUI 中默认不勾选 `统计假期`
-- `B6` 应支付天数按 `E6 + I6 + K6 + L6` 计算
+- `B6` 应支付天数按 `E6 + I6 + J6 + K6 + L6` 计算
 - 勾选后，`I6` 按法定假实际出勤天数统计，`L6` 按周末实际出勤天数统计
 - 假期计数为 `0` 时留空
 - 命令行可使用 `--count-holidays`
