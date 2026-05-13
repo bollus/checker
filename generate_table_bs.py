@@ -50,6 +50,8 @@ LEAVE_LABELS = {
 SIGNATURE_FONT_PATH = Path("Nothing_You_Could_Do") / "NothingYouCouldDo-Regular.ttf"
 SIGNATURE_MEDIA_WIDTH = 900
 SIGNATURE_MEDIA_HEIGHT = 260
+MIN_SIGNATURE_SCALE = 30
+MAX_SIGNATURE_SCALE = 200
 
 
 def col_to_num(col: str) -> int:
@@ -141,7 +143,17 @@ def app_resource_path(relative_path: Path) -> Path:
     return base_dir / relative_path
 
 
-def render_signature_png(signature: str) -> bytes:
+def validate_signature_scale(signature_scale: int | str) -> int:
+    try:
+        scale = int(str(signature_scale).strip().rstrip("%"))
+    except ValueError as exc:
+        raise WorkbookError("签名大小必须是数字，例如 100") from exc
+    if scale < MIN_SIGNATURE_SCALE or scale > MAX_SIGNATURE_SCALE:
+        raise WorkbookError(f"签名大小必须在 {MIN_SIGNATURE_SCALE}% 到 {MAX_SIGNATURE_SCALE}% 之间")
+    return scale
+
+
+def render_signature_png(signature: str, signature_scale: int = 100) -> bytes:
     try:
         from PIL import Image, ImageDraw, ImageFont
     except ImportError as exc:
@@ -153,13 +165,16 @@ def render_signature_png(signature: str) -> bytes:
 
     image = Image.new("RGBA", (SIGNATURE_MEDIA_WIDTH, SIGNATURE_MEDIA_HEIGHT), (255, 255, 255, 0))
     draw = ImageDraw.Draw(image)
-    font_size = 150
+    scale = validate_signature_scale(signature_scale)
+    width_ratio = min(0.98, 0.9 * scale / 100)
+    height_ratio = min(0.9, 0.72 * scale / 100)
+    font_size = 220
     while font_size >= 24:
         font = ImageFont.truetype(str(font_path), font_size)
         bbox = draw.textbbox((0, 0), signature, font=font)
         text_width = bbox[2] - bbox[0]
         text_height = bbox[3] - bbox[1]
-        if text_width <= SIGNATURE_MEDIA_WIDTH * 0.9 and text_height <= SIGNATURE_MEDIA_HEIGHT * 0.72:
+        if text_width <= SIGNATURE_MEDIA_WIDTH * width_ratio and text_height <= SIGNATURE_MEDIA_HEIGHT * height_ratio:
             break
         font_size -= 4
 
@@ -683,6 +698,7 @@ def write_employee_workbook(
     day_headers: List[Tuple[str, int, str]],
     output_dir: Path,
     count_holidays: bool = False,
+    signature_scale: int = 100,
 ) -> Path:
     book = SpreadsheetZip(template_path)
     workbook_root = book.load_xml("xl/workbook.xml")
@@ -719,7 +735,7 @@ def write_employee_workbook(
     set_cell_text(main_sheet, "N7", rest_weekday)
     set_cell_number(main_sheet, "N8", HOURS_PER_DAY)
     signature = signature_text(employee.name)
-    signature_png = render_signature_png(signature)
+    signature_png = render_signature_png(signature, signature_scale)
 
     for row in range(50, 71):
         set_cell_number(main_sheet, f"J{row}", None)
@@ -890,11 +906,18 @@ def next_output_dir(summary_path: Path) -> Path:
     return summary_path.with_name(f"{summary_path.stem}_生成表Bs")
 
 
-def create_generation_report(report_path: Path, generated_files: List[Path], template_path: Path, count_holidays: bool) -> None:
+def create_generation_report(
+    report_path: Path,
+    generated_files: List[Path],
+    template_path: Path,
+    count_holidays: bool,
+    signature_scale: int,
+) -> None:
     lines = [
         f"模板表B: {template_path}",
         f"生成数量: {len(generated_files)}",
         f"是否统计假期: {'是' if count_holidays else '否'}",
+        f"签名大小: {signature_scale}%",
         "默认规则:",
         "- V(年休假) 计入可支付天数",
         "- S(病假) 计入可支付天数",
@@ -912,14 +935,25 @@ def run_generate(
     template_b_path: Path,
     output_dir: Optional[Path] = None,
     count_holidays: bool = False,
+    signature_scale: int = 100,
 ) -> Tuple[Path, List[Path], Path]:
+    signature_scale = validate_signature_scale(signature_scale)
     _, _, day_headers, employees = read_summary(table_c_path)
     output = output_dir or next_output_dir(table_c_path)
     generated_files: List[Path] = []
     for employee in employees:
-        generated_files.append(write_employee_workbook(template_b_path, employee, day_headers, output, count_holidays=count_holidays))
+        generated_files.append(
+            write_employee_workbook(
+                template_b_path,
+                employee,
+                day_headers,
+                output,
+                count_holidays=count_holidays,
+                signature_scale=signature_scale,
+            )
+        )
     report_path = output / "生成说明.txt"
-    create_generation_report(report_path, generated_files, template_b_path, count_holidays)
+    create_generation_report(report_path, generated_files, template_b_path, count_holidays, signature_scale)
     return output, generated_files, report_path
 
 
@@ -930,6 +964,7 @@ def cli() -> int:
     parser.add_argument("--table-bs-dir", help="现有表B目录；未指定模板时会自动取第一个文件做模板")
     parser.add_argument("--output-dir", help="输出目录")
     parser.add_argument("--count-holidays", action="store_true", help="按实际出勤统计 I6 法定假和 L6 周末假，并将 K6/M6 写为 0")
+    parser.add_argument("--signature-scale", type=int, default=100, help="签名大小百分比，默认 100，可选 30-200")
     args = parser.parse_args()
 
     template_path = choose_template_file(args.template_b, args.table_bs_dir)
@@ -938,6 +973,7 @@ def cli() -> int:
         template_b_path=template_path,
         output_dir=Path(args.output_dir) if args.output_dir else None,
         count_holidays=args.count_holidays,
+        signature_scale=args.signature_scale,
     )
     print(f"输出目录: {output_dir}")
     print(f"生成数量: {len(generated_files)}")

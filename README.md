@@ -144,7 +144,7 @@ python generate_table_bs.py --table-c "考勤表汇总.xlsx" --table-bs-dir "考
 - GUI 中默认不勾选 `统计假期`
 - `B6` 应支付天数按 `E6 + I6 + K6 + L6` 计算
 - 勾选后，`I6` 按法定假实际出勤天数统计，`L6` 按周末实际出勤天数统计
-- 勾选后，`K6` 和 `M6` 会写为 `0`
+- 假期计数为 `0` 时留空
 - 命令行可使用 `--count-holidays`
 
 员工签名：
@@ -153,6 +153,8 @@ python generate_table_bs.py --table-c "考勤表汇总.xlsx" --table-bs-dir "考
 - 如果模板中存在 `Overtime` 工作表，会删除 `E53:J53` 范围内原模板签名图片，并插入新的员工签名图片
 - 签名取员工姓名前两个单词，例如 `Salman Raza Raza Khan` 生成 `Salman Raza`
 - 签名图片使用 `Nothing_You_Could_Do/NothingYouCouldDo-Regular.ttf` 渲染，不需要覆盖 `Requested by:` 或 `Applicant’s Signature:` 文本
+- GUI 可用 `签名大小(%)` 调整签名大小，默认 `100`，可填 `30-200`
+- 命令行可使用 `--signature-scale 120` 调整签名大小
 - 运行源码需要安装 `Pillow`：`pip install pillow`；打包 EXE 时会自动安装并把字体文件打包进去
 
 当前默认假设：

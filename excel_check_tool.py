@@ -934,7 +934,7 @@ def launch_gui() -> None:
     for tab in (check_tab, generate_tab, template_tab):
         tab.columnconfigure(1, weight=1)
     check_tab.rowconfigure(7, weight=1)
-    generate_tab.rowconfigure(8, weight=1)
+    generate_tab.rowconfigure(9, weight=1)
     template_tab.columnconfigure(1, weight=1)
     template_tab.rowconfigure(0, weight=1)
 
@@ -1073,6 +1073,7 @@ def launch_gui() -> None:
     generate_table_bs_var = tk.StringVar()
     generate_output_var = tk.StringVar()
     count_holidays_var = tk.BooleanVar(value=False)
+    signature_scale_var = tk.StringVar(value="100")
 
     def choose_table_c() -> None:
         path = filedialog.askopenfilename(
@@ -1110,12 +1111,21 @@ def launch_gui() -> None:
         template_b_text = template_b_var.get().strip()
         table_bs_dir_text = generate_table_bs_var.get().strip()
         output_dir_text = generate_output_var.get().strip()
+        signature_scale_text = signature_scale_var.get().strip() or "100"
 
         if not table_c_text:
             messagebox.showerror("缺少汇总表", "请选择汇总表文件。")
             return
         if not template_b_text and not table_bs_dir_text:
             messagebox.showerror("缺少模板", "请选择考勤表模板，或选择现有考勤表目录。")
+            return
+        try:
+            signature_scale = int(signature_scale_text.rstrip("%"))
+        except ValueError:
+            messagebox.showerror("签名大小无效", "签名大小必须是数字，例如 100。")
+            return
+        if signature_scale < 30 or signature_scale > 200:
+            messagebox.showerror("签名大小无效", "签名大小必须在 30 到 200 之间。")
             return
 
         generate_button.configure(state="disabled")
@@ -1129,6 +1139,7 @@ def launch_gui() -> None:
                 template_b_path=template_path,
                 output_dir=Path(output_dir_text) if output_dir_text else None,
                 count_holidays=count_holidays_var.get(),
+                signature_scale=signature_scale,
             )
         except Exception as exc:
             append_log(generate_log_text, f"失败: {exc}")
@@ -1175,12 +1186,18 @@ def launch_gui() -> None:
         variable=count_holidays_var,
     ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(0, 8))
 
-    generate_button = ttk.Button(generate_tab, text="开始生成考勤表", command=start_generate)
-    generate_button.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+    ttk.Label(generate_tab, text="签名大小(%)").grid(row=6, column=0, sticky="w", pady=(0, 8))
+    ttk.Entry(generate_tab, textvariable=signature_scale_var, width=12).grid(
+        row=6, column=1, sticky="w", padx=(8, 8), pady=(0, 8)
+    )
+    ttk.Label(generate_tab, text="默认 100，可填 30-200").grid(row=6, column=2, sticky="w", pady=(0, 8))
 
-    ttk.Label(generate_tab, text="日志").grid(row=7, column=0, columnspan=3, sticky="w", pady=(0, 6))
+    generate_button = ttk.Button(generate_tab, text="开始生成考勤表", command=start_generate)
+    generate_button.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+
+    ttk.Label(generate_tab, text="日志").grid(row=8, column=0, columnspan=3, sticky="w", pady=(0, 6))
     generate_log_text = tk.Text(generate_tab, height=14, wrap="word", state="disabled")
-    generate_log_text.grid(row=8, column=0, columnspan=3, sticky="nsew")
+    generate_log_text.grid(row=9, column=0, columnspan=3, sticky="nsew")
 
     template_left = ttk.Frame(template_tab)
     template_right = ttk.Frame(template_tab)
