@@ -8,8 +8,10 @@ on:
       - master
     paths:
       - "excel_check_tool.py"
+      - "generate_table_bs.py"
       - "excel_check_tool.spec"
       - "README.md"
+      - "Nothing_You_Could_Do/**"
       - ".github/workflows/build-windows-exe.yml"
 
 jobs:
@@ -25,8 +27,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install PyInstaller
-        run: python -m pip install --upgrade pip pyinstaller
+      - name: Install build dependencies
+        run: python -m pip install --upgrade pip pyinstaller pillow
 
       - name: Build EXE
         run: python -m PyInstaller --clean excel_check_tool.spec

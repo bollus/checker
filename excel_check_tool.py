@@ -550,6 +550,7 @@ class SpreadsheetZip:
 
     def save(self, output_path: Path, replacements: Dict[str, bytes]) -> None:
         with zipfile.ZipFile(output_path, "w") as out_zip:
+            written = set()
             for filename, info in self.zip_infos.items():
                 if info.is_dir():
                     continue
@@ -564,6 +565,10 @@ class SpreadsheetZip:
                 new_info.flag_bits = info.flag_bits
                 new_info.internal_attr = info.internal_attr
                 out_zip.writestr(new_info, data)
+                written.add(filename)
+            for filename, data in replacements.items():
+                if filename not in written:
+                    out_zip.writestr(filename, data)
 
 
 @dataclass

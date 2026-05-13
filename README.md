@@ -148,10 +148,11 @@ python generate_table_bs.py --table-c "考勤表汇总.xlsx" --table-bs-dir "考
 
 员工签名：
 
-- 生成表B时会在 `New timesheet` 的 `A42:G44` 写入员工签名
-- 如果模板中存在 `Overtime` 工作表，会在 `E53:J53` 写入员工签名
+- 生成表B时会删除 `New timesheet` 的 `A42:G44` 范围内原模板签名图片，并插入新的员工签名图片
+- 如果模板中存在 `Overtime` 工作表，会删除 `E53:J53` 范围内原模板签名图片，并插入新的员工签名图片
 - 签名取员工姓名前两个单词，例如 `Salman Raza Raza Khan` 生成 `Salman Raza`
-- 签名字体使用 `Nothing You Could Do`；Windows 电脑需要安装 `Nothing_You_Could_Do/NothingYouCouldDo-Regular.ttf`，否则 Excel 可能会自动替换为其它字体
+- 签名图片使用 `Nothing_You_Could_Do/NothingYouCouldDo-Regular.ttf` 渲染，不需要覆盖 `Requested by:` 或 `Applicant’s Signature:` 文本
+- 运行源码需要安装 `Pillow`：`pip install pillow`；打包 EXE 时会自动安装并把字体文件打包进去
 
 当前默认假设：
 

@@ -9,10 +9,10 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo Installing or updating PyInstaller...
-py -m pip install pyinstaller
+echo Installing or updating build dependencies...
+py -m pip install pyinstaller pillow
 if errorlevel 1 (
-    echo Failed to install PyInstaller.
+    echo Failed to install build dependencies.
     pause
     exit /b 1
 )

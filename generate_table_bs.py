@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import argparse
-import copy
+import io
+import posixpath
 import re
+import sys
 import zipfile
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 import xml.etree.ElementTree as ET
 
 from excel_check_tool import (
@@ -20,6 +22,17 @@ from excel_check_tool import (
     qn,
     workbook_sheets,
 )
+
+
+XDR_NS = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+CONTENT_TYPES_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
+
+ET.register_namespace("xdr", XDR_NS)
+ET.register_namespace("a", A_NS)
+ET.register_namespace("r", R_NS)
 
 
 DAY_START = Decimal("0.25")
@@ -34,8 +47,9 @@ LEAVE_LABELS = {
     "S": "Sick Leave",
     "V": "Vacation",
 }
-SIGNATURE_FONT_NAME = "Nothing You Could Do"
-SIGNATURE_FONT_SIZE = "22"
+SIGNATURE_FONT_PATH = Path("Nothing_You_Could_Do") / "NothingYouCouldDo-Regular.ttf"
+SIGNATURE_MEDIA_WIDTH = 900
+SIGNATURE_MEDIA_HEIGHT = 260
 
 
 def col_to_num(col: str) -> int:
@@ -122,69 +136,193 @@ def signature_text(employee_name: str) -> str:
     return " ".join(parts[:2]) if len(parts) >= 2 else " ".join(parts)
 
 
-def ensure_signature_style(styles_root: ET.Element) -> Callable[[int], int]:
-    fonts = styles_root.find(qn("fonts"))
-    cell_xfs = styles_root.find(qn("cellXfs"))
-    if fonts is None or cell_xfs is None:
-        raise WorkbookError("styles.xml is missing fonts or cellXfs")
+def app_resource_path(relative_path: Path) -> Path:
+    base_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base_dir / relative_path
 
-    def font_name(font: ET.Element) -> str:
-        name = font.find(qn("name"))
-        return name.attrib.get("val", "") if name is not None else ""
 
-    signature_font_id: Optional[int] = None
-    for index, font in enumerate(list(fonts)):
-        if font_name(font).casefold() == SIGNATURE_FONT_NAME.casefold():
-            signature_font_id = index
+def render_signature_png(signature: str) -> bytes:
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError as exc:
+        raise WorkbookError("生成签名图片需要 Pillow，请先安装: pip install pillow") from exc
+
+    font_path = app_resource_path(SIGNATURE_FONT_PATH)
+    if not font_path.exists():
+        raise WorkbookError(f"缺少签名字体文件: {font_path}")
+
+    image = Image.new("RGBA", (SIGNATURE_MEDIA_WIDTH, SIGNATURE_MEDIA_HEIGHT), (255, 255, 255, 0))
+    draw = ImageDraw.Draw(image)
+    font_size = 150
+    while font_size >= 24:
+        font = ImageFont.truetype(str(font_path), font_size)
+        bbox = draw.textbbox((0, 0), signature, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        if text_width <= SIGNATURE_MEDIA_WIDTH * 0.9 and text_height <= SIGNATURE_MEDIA_HEIGHT * 0.72:
             break
+        font_size -= 4
 
-    style_cache: Dict[int, int] = {}
-
-    def style_for(base_style: int) -> int:
-        nonlocal signature_font_id
-        if base_style in style_cache:
-            return style_cache[base_style]
-
-        all_xfs = list(cell_xfs)
-        if base_style >= len(all_xfs):
-            base_style = 0
-        base_xf = all_xfs[base_style]
-
-        if signature_font_id is None:
-            all_fonts = list(fonts)
-            base_font_id = int(base_xf.attrib.get("fontId", "0"))
-            if base_font_id >= len(all_fonts):
-                base_font_id = 0
-            new_font = copy.deepcopy(all_fonts[base_font_id])
-            for old_name in list(new_font.findall(qn("name"))):
-                new_font.remove(old_name)
-            new_font.insert(0, ET.Element(qn("name"), {"val": SIGNATURE_FONT_NAME}))
-            size = new_font.find(qn("sz"))
-            if size is None:
-                size = ET.Element(qn("sz"))
-                new_font.insert(0, size)
-            size.attrib["val"] = SIGNATURE_FONT_SIZE
-            fonts.append(new_font)
-            signature_font_id = len(list(fonts)) - 1
-            fonts.attrib["count"] = str(len(list(fonts)))
-
-        new_xf = copy.deepcopy(base_xf)
-        new_xf.attrib["fontId"] = str(signature_font_id)
-        new_xf.attrib["applyFont"] = "1"
-        cell_xfs.append(new_xf)
-        new_index = len(list(cell_xfs)) - 1
-        cell_xfs.attrib["count"] = str(len(list(cell_xfs)))
-        style_cache[base_style] = new_index
-        return new_index
-
-    return style_for
+    x = (SIGNATURE_MEDIA_WIDTH - text_width) / 2 - bbox[0]
+    y = (SIGNATURE_MEDIA_HEIGHT - text_height) / 2 - bbox[1] + SIGNATURE_MEDIA_HEIGHT * 0.04
+    draw.text((x, y), signature, fill=(20, 20, 20, 245), font=font)
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
 
 
-def set_signature_cell(sheet: SheetXml, cell_ref: str, value: str, signature_style_for: Callable[[int], int]) -> None:
-    set_cell_text(sheet, cell_ref, value)
-    cell = sheet.ensure_cell(cell_ref)
-    base_style = int(cell.attrib.get("s", "0"))
-    cell.attrib["s"] = str(signature_style_for(base_style))
+def xdr(tag: str) -> str:
+    return f"{{{XDR_NS}}}{tag}"
+
+
+def a_tag(tag: str) -> str:
+    return f"{{{A_NS}}}{tag}"
+
+
+def rel_tag(tag: str) -> str:
+    return f"{{{REL_NS}}}{tag}"
+
+
+def content_type_tag(tag: str) -> str:
+    return f"{{{CONTENT_TYPES_NS}}}{tag}"
+
+
+def relationship_id(value: str) -> str:
+    return f"{{{R_NS}}}{value}"
+
+
+def anchor_bounds(anchor: ET.Element) -> Tuple[int, int, int, int]:
+    from_node = anchor.find(xdr("from"))
+    to_node = anchor.find(xdr("to"))
+    if from_node is None or to_node is None:
+        return 0, 0, 0, 0
+    from_col = int((from_node.findtext(xdr("col")) or "0"))
+    from_row = int((from_node.findtext(xdr("row")) or "0"))
+    to_col = int((to_node.findtext(xdr("col")) or "0"))
+    to_row = int((to_node.findtext(xdr("row")) or "0"))
+    return from_col, from_row, to_col, to_row
+
+
+def overlaps_range(anchor: ET.Element, min_col: int, min_row: int, max_col: int, max_row: int) -> bool:
+    from_col, from_row, to_col, to_row = anchor_bounds(anchor)
+    return from_col <= max_col and to_col >= min_col and from_row <= max_row and to_row >= min_row
+
+
+def next_relationship_id(rels_root: ET.Element) -> str:
+    max_id = 0
+    for rel in rels_root.findall(rel_tag("Relationship")):
+        rel_id = rel.attrib.get("Id", "")
+        match = re.fullmatch(r"rId(\d+)", rel_id)
+        if match:
+            max_id = max(max_id, int(match.group(1)))
+    return f"rId{max_id + 1}"
+
+
+def next_picture_id(drawing_root: ET.Element) -> int:
+    max_id = 0
+    for node in drawing_root.iter(xdr("cNvPr")):
+        raw_id = node.attrib.get("id")
+        if raw_id and raw_id.isdigit():
+            max_id = max(max_id, int(raw_id))
+    return max_id + 1
+
+
+def create_fallback_anchor(
+    from_col: int,
+    from_row: int,
+    to_col: int,
+    to_row: int,
+    rel_id: str,
+    picture_id: int,
+    picture_name: str,
+) -> ET.Element:
+    anchor = ET.Element(xdr("twoCellAnchor"))
+    from_node = ET.SubElement(anchor, xdr("from"))
+    ET.SubElement(from_node, xdr("col")).text = str(from_col)
+    ET.SubElement(from_node, xdr("colOff")).text = "0"
+    ET.SubElement(from_node, xdr("row")).text = str(from_row)
+    ET.SubElement(from_node, xdr("rowOff")).text = "0"
+    to_node = ET.SubElement(anchor, xdr("to"))
+    ET.SubElement(to_node, xdr("col")).text = str(to_col)
+    ET.SubElement(to_node, xdr("colOff")).text = "0"
+    ET.SubElement(to_node, xdr("row")).text = str(to_row)
+    ET.SubElement(to_node, xdr("rowOff")).text = "0"
+    pic = ET.SubElement(anchor, xdr("pic"))
+    nv_pic_pr = ET.SubElement(pic, xdr("nvPicPr"))
+    ET.SubElement(nv_pic_pr, xdr("cNvPr"), {"id": str(picture_id), "name": picture_name})
+    c_nv_pic_pr = ET.SubElement(nv_pic_pr, xdr("cNvPicPr"))
+    ET.SubElement(c_nv_pic_pr, a_tag("picLocks"), {"noChangeAspect": "1"})
+    blip_fill = ET.SubElement(pic, xdr("blipFill"))
+    ET.SubElement(blip_fill, a_tag("blip"), {relationship_id("embed"): rel_id})
+    stretch = ET.SubElement(blip_fill, a_tag("stretch"))
+    ET.SubElement(stretch, a_tag("fillRect"))
+    sp_pr = ET.SubElement(pic, xdr("spPr"))
+    ET.SubElement(sp_pr, a_tag("prstGeom"), {"prst": "rect"})
+    ET.SubElement(anchor, xdr("clientData"))
+    return anchor
+
+
+def apply_signature_to_drawing(
+    book: SpreadsheetZip,
+    replacements: Dict[str, bytes],
+    drawing_part: str,
+    signature_media_path: str,
+    target_range: Tuple[int, int, int, int],
+    fallback_anchor: Tuple[int, int, int, int],
+) -> None:
+    rels_part = f"{posixpath.dirname(drawing_part)}/_rels/{posixpath.basename(drawing_part)}.rels"
+    drawing_root = ET.fromstring(replacements.get(drawing_part, book.raw_entries[drawing_part]))
+    rels_root = ET.fromstring(replacements.get(rels_part, book.raw_entries[rels_part]))
+
+    removed_anchor: Optional[ET.Element] = None
+    min_col, min_row, max_col, max_row = target_range
+    for anchor in list(drawing_root):
+        if anchor.find(xdr("pic")) is None:
+            continue
+        if overlaps_range(anchor, min_col, min_row, max_col, max_row):
+            if removed_anchor is None:
+                removed_anchor = anchor
+            drawing_root.remove(anchor)
+
+    rel_id = next_relationship_id(rels_root)
+    ET.SubElement(
+        rels_root,
+        rel_tag("Relationship"),
+        {
+            "Id": rel_id,
+            "Type": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+            "Target": f"../media/{posixpath.basename(signature_media_path)}",
+        },
+    )
+
+    if removed_anchor is not None:
+        new_anchor = removed_anchor
+        blip = new_anchor.find(f".//{a_tag('blip')}")
+        if blip is not None:
+            blip.attrib[relationship_id("embed")] = rel_id
+        c_nv_pr = new_anchor.find(f".//{xdr('cNvPr')}")
+        if c_nv_pr is not None:
+            c_nv_pr.attrib["id"] = str(next_picture_id(drawing_root))
+            c_nv_pr.attrib["name"] = "Generated Signature"
+    else:
+        new_anchor = create_fallback_anchor(
+            *fallback_anchor,
+            rel_id=rel_id,
+            picture_id=next_picture_id(drawing_root),
+            picture_name="Generated Signature",
+        )
+    drawing_root.append(new_anchor)
+    replacements[drawing_part] = ET.tostring(drawing_root, encoding="utf-8", xml_declaration=True)
+    replacements[rels_part] = ET.tostring(rels_root, encoding="utf-8", xml_declaration=True)
+
+
+def ensure_png_content_type(book: SpreadsheetZip, replacements: Dict[str, bytes]) -> None:
+    root = ET.fromstring(replacements.get("[Content_Types].xml", book.raw_entries["[Content_Types].xml"]))
+    for default in root.findall(content_type_tag("Default")):
+        if default.attrib.get("Extension", "").lower() == "png":
+            return
+    ET.SubElement(root, content_type_tag("Default"), {"Extension": "png", "ContentType": "image/png"})
+    replacements["[Content_Types].xml"] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
 def set_calc_flags(book_root: ET.Element) -> None:
@@ -429,18 +567,31 @@ def fill_row(
     return payable, work_hours, work_ot, rest_hours, holiday_hours
 
 
-def update_overtime_sheet(
-    overtime_sheet: Optional[SheetXml],
-    employee: SummaryEmployee,
-    signature: str,
-    signature_style_for: Callable[[int], int],
-) -> None:
+def update_overtime_sheet(overtime_sheet: Optional[SheetXml], employee: SummaryEmployee) -> None:
     if overtime_sheet is None:
         return
     set_cell_text(overtime_sheet, "B5", employee.name)
     set_cell_text(overtime_sheet, "B7", employee.project)
     set_cell_text(overtime_sheet, "I7", employee.position)
-    set_signature_cell(overtime_sheet, "E53", signature, signature_style_for)
+
+
+def sheet_drawing_part(book: SpreadsheetZip, sheet_part: str, sheet: SheetXml) -> Optional[str]:
+    drawing = sheet.root.find(qn("drawing"))
+    if drawing is None:
+        return None
+    rel_id = drawing.attrib.get(relationship_id("id"))
+    if not rel_id:
+        return None
+    rels_part = f"{posixpath.dirname(sheet_part)}/_rels/{posixpath.basename(sheet_part)}.rels"
+    if rels_part not in book.raw_entries:
+        return None
+    rels_root = book.load_xml(rels_part)
+    for rel in rels_root.findall(rel_tag("Relationship")):
+        if rel.attrib.get("Id") != rel_id:
+            continue
+        target = rel.attrib.get("Target", "")
+        return posixpath.normpath(posixpath.join(posixpath.dirname(sheet_part), target))
+    return None
 
 
 def choose_template_sheet(sheets: List[WorkbookSheet], sheet_name: str) -> Optional[WorkbookSheet]:
@@ -459,8 +610,6 @@ def write_employee_workbook(
 ) -> Path:
     book = SpreadsheetZip(template_path)
     workbook_root = book.load_xml("xl/workbook.xml")
-    styles_root = book.load_xml("xl/styles.xml")
-    signature_style_for = ensure_signature_style(styles_root)
     sheets = workbook_sheets(book)
     main_sheet_info = choose_template_sheet(sheets, "New timesheet") or sheets[0]
     overtime_sheet_info = choose_template_sheet(sheets, "Overtime")
@@ -494,7 +643,7 @@ def write_employee_workbook(
     set_cell_text(main_sheet, "N7", rest_weekday)
     set_cell_number(main_sheet, "N8", HOURS_PER_DAY)
     signature = signature_text(employee.name)
-    set_signature_cell(main_sheet, "A42", signature, signature_style_for)
+    signature_png = render_signature_png(signature)
 
     for row in range(50, 71):
         set_cell_number(main_sheet, f"J{row}", None)
@@ -599,18 +748,41 @@ def write_employee_workbook(
     set_cell_number(main_sheet, "I9", rest_ot_sum if rest_ot_sum > 0 else None)
     set_cell_number(main_sheet, "J9", holiday_ot_sum if holiday_ot_sum > 0 else None)
 
-    update_overtime_sheet(overtime_sheet, employee, signature, signature_style_for)
+    update_overtime_sheet(overtime_sheet, employee)
     set_calc_flags(workbook_root)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / build_output_name(employee, template_path.suffix)
+    signature_media_path = "xl/media/generated_signature.png"
     replacements = {
         "xl/workbook.xml": ET.tostring(workbook_root, encoding="utf-8", xml_declaration=True),
-        "xl/styles.xml": ET.tostring(styles_root, encoding="utf-8", xml_declaration=True),
         main_sheet_info.part_name: ET.tostring(main_sheet.root, encoding="utf-8", xml_declaration=True),
+        signature_media_path: signature_png,
     }
+    ensure_png_content_type(book, replacements)
     if overtime_sheet_info is not None:
         replacements[overtime_sheet_info.part_name] = ET.tostring(overtime_sheet.root, encoding="utf-8", xml_declaration=True)
+    main_drawing_part = sheet_drawing_part(book, main_sheet_info.part_name, main_sheet)
+    if main_drawing_part is not None:
+        apply_signature_to_drawing(
+            book,
+            replacements,
+            main_drawing_part,
+            signature_media_path,
+            target_range=(0, 41, 6, 43),
+            fallback_anchor=(1, 41, 3, 43),
+        )
+    if overtime_sheet_info is not None and overtime_sheet is not None:
+        overtime_drawing_part = sheet_drawing_part(book, overtime_sheet_info.part_name, overtime_sheet)
+        if overtime_drawing_part is not None:
+            apply_signature_to_drawing(
+                book,
+                replacements,
+                overtime_drawing_part,
+                signature_media_path,
+                target_range=(4, 52, 9, 52),
+                fallback_anchor=(7, 51, 8, 53),
+            )
     book.save(output_path, replacements)
     return output_path
 
