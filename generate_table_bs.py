@@ -817,11 +817,21 @@ def write_employee_workbook(
     unpaid_leave_days = {day for day, (entry_type, _) in employee.days.items() if entry_type in {"A", "E"}}
     unpaid_adjacent_special_days = set()
     if not count_holidays:
-        for _, day_number, day_type in day_headers:
-            entry_type, total_hours = employee.days.get(day_number, ("blank", None))
-            attended = entry_type == "hours" and total_hours is not None and total_hours > 0
-            if day_type in {"rest", "holiday"} and not attended and {day_number - 1, day_number + 1} & unpaid_leave_days:
-                unpaid_adjacent_special_days.add(day_number)
+        special_day_numbers = [day for _, day, day_type in day_headers if day_type in {"rest", "holiday"}]
+        special_day_groups: List[List[int]] = []
+        for day_number in special_day_numbers:
+            if not special_day_groups or day_number != special_day_groups[-1][-1] + 1:
+                special_day_groups.append([day_number])
+            else:
+                special_day_groups[-1].append(day_number)
+        for group in special_day_groups:
+            if not ({group[0] - 1, group[-1] + 1} & unpaid_leave_days):
+                continue
+            for day_number in group:
+                entry_type, total_hours = employee.days.get(day_number, ("blank", None))
+                attended = entry_type == "hours" and total_hours is not None and total_hours > 0
+                if not attended and entry_type not in {"S", "V"}:
+                    unpaid_adjacent_special_days.add(day_number)
 
     payable_total = 0
     work_sum = Decimal("0")
