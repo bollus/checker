@@ -896,6 +896,8 @@ def write_employee_workbook(
             public_attendance += 1
         if kind == "rest" and attended:
             rest_attendance += 1
+        if not count_holidays and entry_type == "V":
+            continue
         if kind == "holiday" and main_sheet.get_value(f"T{9 + day_number}") not in (None, ""):
             public_payable += 1
         if kind == "rest" and main_sheet.get_value(f"T{9 + day_number}") not in (None, ""):
