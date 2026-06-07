@@ -547,7 +547,7 @@ def fill_row(
     total_hours: Optional[Decimal],
     payable_context: Tuple[Optional[int], Optional[int], bool, bool],
     count_holidays: bool,
-    unpaid_adjacent_rest_days: set[int],
+    unpaid_adjacent_special_days: set[int],
 ) -> Tuple[bool, Decimal, Decimal, Decimal, Decimal]:
     first_active, last_active, prefix_unpaid, suffix_unpaid = payable_context
     row_refs = [f"{col}{row_num}" for col in "ABCDEFGHIJKNOPQRT"]
@@ -592,7 +592,7 @@ def fill_row(
         is_suffix = last_active is not None and current_date.day > last_active
         if day_type in {"rest", "holiday"}:
             payable = not ((is_prefix and prefix_unpaid) or (is_suffix and suffix_unpaid))
-        if day_type == "rest" and current_date.day in unpaid_adjacent_rest_days:
+        if day_type in {"rest", "holiday"} and current_date.day in unpaid_adjacent_special_days:
             payable = False
         if day_type == "rest":
             set_cell_text(sheet, f"K{row_num}", "Weekend")
@@ -815,13 +815,13 @@ def write_employee_workbook(
     prefix_unpaid = first_active is not None and has_unpaid_marker(range(1, first_active))
     suffix_unpaid = last_active is not None and has_unpaid_marker(range(last_active + 1, len(day_headers) + 1))
     unpaid_leave_days = {day for day, (entry_type, _) in employee.days.items() if entry_type in {"A", "E"}}
-    unpaid_adjacent_rest_days = set()
+    unpaid_adjacent_special_days = set()
     if not count_holidays:
         for _, day_number, day_type in day_headers:
             entry_type, total_hours = employee.days.get(day_number, ("blank", None))
             attended = entry_type == "hours" and total_hours is not None and total_hours > 0
-            if day_type == "rest" and not attended and {day_number - 1, day_number + 1} & unpaid_leave_days:
-                unpaid_adjacent_rest_days.add(day_number)
+            if day_type in {"rest", "holiday"} and not attended and {day_number - 1, day_number + 1} & unpaid_leave_days:
+                unpaid_adjacent_special_days.add(day_number)
 
     payable_total = 0
     work_sum = Decimal("0")
@@ -846,7 +846,7 @@ def write_employee_workbook(
             total_hours,
             (first_active, last_active, prefix_unpaid, suffix_unpaid),
             count_holidays,
-            unpaid_adjacent_rest_days,
+            unpaid_adjacent_special_days,
         )
         payable_total += 1 if payable else 0
         work_sum += work_hours
