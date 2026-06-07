@@ -546,6 +546,8 @@ def fill_row(
     entry_type: str,
     total_hours: Optional[Decimal],
     payable_context: Tuple[Optional[int], Optional[int], bool, bool],
+    count_holidays: bool,
+    unpaid_adjacent_rest_days: set[int],
 ) -> Tuple[bool, Decimal, Decimal, Decimal, Decimal]:
     first_active, last_active, prefix_unpaid, suffix_unpaid = payable_context
     row_refs = [f"{col}{row_num}" for col in "ABCDEFGHIJKNOPQRT"]
@@ -590,10 +592,15 @@ def fill_row(
         is_suffix = last_active is not None and current_date.day > last_active
         if day_type in {"rest", "holiday"}:
             payable = not ((is_prefix and prefix_unpaid) or (is_suffix and suffix_unpaid))
+        if day_type == "rest" and current_date.day in unpaid_adjacent_rest_days:
+            payable = False
         if day_type == "rest":
             set_cell_text(sheet, f"K{row_num}", "Weekend")
         elif day_type == "holiday":
             set_cell_text(sheet, f"K{row_num}", "Public Holiday")
+
+    if not count_holidays and day_type == "rest" and entry_type != "V":
+        set_cell_text(sheet, f"K{row_num}", "Weekend")
 
     set_cell_number(sheet, f"G{row_num}", work_hours if work_hours > 0 else None)
     set_cell_number(sheet, f"H{row_num}", work_ot if work_ot > 0 else None)
@@ -610,12 +617,46 @@ def fill_row(
     return payable, work_hours, work_ot, rest_hours, holiday_hours
 
 
-def update_overtime_sheet(overtime_sheet: Optional[SheetXml], employee: SummaryEmployee) -> None:
+@dataclass
+class OvertimeEntry:
+    day: date
+    start: Optional[Decimal]
+    end: Optional[Decimal]
+    normal_hours: Decimal
+    weekend_hours: Decimal
+    holiday_hours: Decimal
+
+
+def update_overtime_sheet(
+    overtime_sheet: Optional[SheetXml],
+    employee: SummaryEmployee,
+    overtime_entries: List[OvertimeEntry],
+) -> None:
     if overtime_sheet is None:
         return
     set_cell_text(overtime_sheet, "B5", employee.name)
     set_cell_text(overtime_sheet, "B7", employee.project)
     set_cell_text(overtime_sheet, "I7", employee.position)
+    for row in range(12, 43):
+        for col in ["A", "B", "E", "H", "I", "J"]:
+            set_cell_number(overtime_sheet, f"{col}{row}", None)
+    for row, entry in enumerate(overtime_entries[:31], start=12):
+        set_cell_number(overtime_sheet, f"A{row}", date_to_excel_serial(entry.day))
+        set_cell_number(overtime_sheet, f"B{row}", entry.start)
+        set_cell_number(overtime_sheet, f"E{row}", entry.end)
+        set_cell_number(overtime_sheet, f"H{row}", entry.normal_hours if entry.normal_hours > 0 else None)
+        set_cell_number(overtime_sheet, f"I{row}", entry.weekend_hours if entry.weekend_hours > 0 else None)
+        set_cell_number(overtime_sheet, f"J{row}", entry.holiday_hours if entry.holiday_hours > 0 else None)
+
+    normal_total = sum((entry.normal_hours for entry in overtime_entries), Decimal("0"))
+    weekend_total = sum((entry.weekend_hours for entry in overtime_entries), Decimal("0"))
+    holiday_total = sum((entry.holiday_hours for entry in overtime_entries), Decimal("0"))
+    set_cell_number(overtime_sheet, "H43", normal_total if normal_total > 0 else None)
+    set_cell_number(overtime_sheet, "I43", weekend_total if weekend_total > 0 else None)
+    set_cell_number(overtime_sheet, "J43", holiday_total if holiday_total > 0 else None)
+    set_cell_number(overtime_sheet, "H44", normal_total / HOURS_PER_DAY if normal_total > 0 else None)
+    set_cell_number(overtime_sheet, "I44", weekend_total / HOURS_PER_DAY if weekend_total > 0 else None)
+    set_cell_number(overtime_sheet, "J44", holiday_total / HOURS_PER_DAY if holiday_total > 0 else None)
 
 
 def sheet_drawing_part(book: SpreadsheetZip, sheet_part: str, sheet: SheetXml) -> Optional[str]:
@@ -773,6 +814,14 @@ def write_employee_workbook(
 
     prefix_unpaid = first_active is not None and has_unpaid_marker(range(1, first_active))
     suffix_unpaid = last_active is not None and has_unpaid_marker(range(last_active + 1, len(day_headers) + 1))
+    unpaid_leave_days = {day for day, (entry_type, _) in employee.days.items() if entry_type in {"A", "E"}}
+    unpaid_adjacent_rest_days = set()
+    if not count_holidays:
+        for _, day_number, day_type in day_headers:
+            entry_type, total_hours = employee.days.get(day_number, ("blank", None))
+            attended = entry_type == "hours" and total_hours is not None and total_hours > 0
+            if day_type == "rest" and not attended and {day_number - 1, day_number + 1} & unpaid_leave_days:
+                unpaid_adjacent_rest_days.add(day_number)
 
     payable_total = 0
     work_sum = Decimal("0")
@@ -782,6 +831,7 @@ def write_employee_workbook(
     vacation_days = 0
     sick_days = 0
     emergency_days = 0
+    overtime_entries: List[OvertimeEntry] = []
 
     for _, day_number, day_type in day_headers:
         current_date = date(month_start.year, month_start.month, day_number)
@@ -795,12 +845,30 @@ def write_employee_workbook(
             entry_type,
             total_hours,
             (first_active, last_active, prefix_unpaid, suffix_unpaid),
+            count_holidays,
+            unpaid_adjacent_rest_days,
         )
         payable_total += 1 if payable else 0
         work_sum += work_hours
         work_ot_sum += work_ot
         rest_ot_sum += rest_hours
         holiday_ot_sum += holiday_hours
+        if work_ot > 0 or rest_hours > 0 or holiday_hours > 0:
+            if day_type == "work":
+                start_time = LUNCH_END + HOURS_PER_DAY / Decimal("24")
+                end_time = start_time + work_ot / Decimal("24")
+            else:
+                start_time, _, _, end_time = day_time_inputs(total_hours or Decimal("0"))
+            overtime_entries.append(
+                OvertimeEntry(
+                    day=current_date,
+                    start=start_time,
+                    end=end_time,
+                    normal_hours=work_ot,
+                    weekend_hours=rest_hours,
+                    holiday_hours=holiday_hours,
+                )
+            )
         if entry_type == "V":
             vacation_days += 1
         elif entry_type == "S":
@@ -854,7 +922,7 @@ def write_employee_workbook(
     set_cell_number(main_sheet, "I9", rest_ot_sum if rest_ot_sum > 0 else None)
     set_cell_number(main_sheet, "J9", holiday_ot_sum if holiday_ot_sum > 0 else None)
 
-    update_overtime_sheet(overtime_sheet, employee)
+    update_overtime_sheet(overtime_sheet, employee, overtime_entries)
     set_calc_flags(workbook_root)
 
     output_dir.mkdir(parents=True, exist_ok=True)
