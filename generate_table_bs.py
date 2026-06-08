@@ -599,8 +599,10 @@ def fill_row(
         elif day_type == "holiday":
             set_cell_text(sheet, f"K{row_num}", "Public Holiday")
 
-    if not count_holidays and day_type == "rest" and entry_type != "V":
+    if entry_type not in LEAVE_LABELS and day_type == "rest":
         set_cell_text(sheet, f"K{row_num}", "Weekend")
+    elif entry_type not in LEAVE_LABELS and day_type == "holiday":
+        set_cell_text(sheet, f"K{row_num}", "Public Holiday")
 
     set_cell_number(sheet, f"G{row_num}", work_hours if work_hours > 0 else None)
     set_cell_number(sheet, f"H{row_num}", work_ot if work_ot > 0 else None)
