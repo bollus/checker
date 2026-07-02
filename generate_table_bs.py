@@ -735,15 +735,27 @@ def update_overtime_sheet(
         set_cell_number(overtime_sheet, f"I{correction_row}", employee.correction_weekend_ot if employee.correction_weekend_ot != 0 else None)
         set_cell_number(overtime_sheet, f"J{correction_row}", employee.correction_holiday_ot if employee.correction_holiday_ot != 0 else None)
 
-    normal_total = sum((entry.normal_hours for entry in overtime_entries), Decimal("0"))
-    weekend_total = sum((entry.weekend_hours for entry in overtime_entries), Decimal("0"))
-    holiday_total = sum((entry.holiday_hours for entry in overtime_entries), Decimal("0"))
-    set_cell_number(overtime_sheet, "H43", normal_total if normal_total > 0 else None)
-    set_cell_number(overtime_sheet, "I43", weekend_total if weekend_total > 0 else None)
-    set_cell_number(overtime_sheet, "J43", holiday_total if holiday_total > 0 else None)
-    set_cell_number(overtime_sheet, "H44", normal_total / schedule.normal_hours if normal_total > 0 else None)
-    set_cell_number(overtime_sheet, "I44", weekend_total / schedule.normal_hours if weekend_total > 0 else None)
-    set_cell_number(overtime_sheet, "J44", holiday_total / schedule.normal_hours if holiday_total > 0 else None)
+    normal_detail_total = sum((entry.normal_hours for entry in overtime_entries), Decimal("0"))
+    weekend_detail_total = sum((entry.weekend_hours for entry in overtime_entries), Decimal("0"))
+    holiday_detail_total = sum((entry.holiday_hours for entry in overtime_entries), Decimal("0"))
+    normal_total = normal_detail_total + employee.correction_normal_ot
+    weekend_total = weekend_detail_total + employee.correction_weekend_ot
+    holiday_total = holiday_detail_total + employee.correction_holiday_ot
+    normal_days = sum(1 for entry in overtime_entries if entry.normal_hours > 0)
+    weekend_days = sum(1 for entry in overtime_entries if entry.weekend_hours > 0)
+    holiday_days = sum(1 for entry in overtime_entries if entry.holiday_hours > 0)
+    if employee.correction_normal_ot > 0:
+        normal_days += 1
+    if employee.correction_weekend_ot > 0:
+        weekend_days += 1
+    if employee.correction_holiday_ot > 0:
+        holiday_days += 1
+    set_cell_number(overtime_sheet, "H43", normal_total if normal_total != 0 else None)
+    set_cell_number(overtime_sheet, "I43", weekend_total if weekend_total != 0 else None)
+    set_cell_number(overtime_sheet, "J43", holiday_total if holiday_total != 0 else None)
+    set_cell_number(overtime_sheet, "H44", normal_days if normal_days > 0 else None)
+    set_cell_number(overtime_sheet, "I44", weekend_days if weekend_days > 0 else None)
+    set_cell_number(overtime_sheet, "J44", holiday_days if holiday_days > 0 else None)
 
 
 def sheet_drawing_part(book: SpreadsheetZip, sheet_part: str, sheet: SheetXml) -> Optional[str]:
@@ -1038,10 +1050,14 @@ def write_employee_workbook(
     set_cell_number(main_sheet, "K6", sick_day_count if sick_day_count > 0 else None)
     set_cell_number(main_sheet, "L6", rest_day_count if rest_day_count > 0 else None)
     set_cell_number(main_sheet, "M6", None if count_holidays else (emergency_days if emergency_days > 0 else None))
-    set_cell_number(main_sheet, "G9", work_sum if work_sum > 0 else None)
-    set_cell_number(main_sheet, "H9", work_ot_sum if work_ot_sum > 0 else None)
-    set_cell_number(main_sheet, "I9", rest_ot_sum if rest_ot_sum > 0 else None)
-    set_cell_number(main_sheet, "J9", holiday_ot_sum if holiday_ot_sum > 0 else None)
+    normal_work_total = work_sum + employee.correction_nwh
+    set_cell_number(main_sheet, "G9", normal_work_total if normal_work_total != 0 else None)
+    normal_ot_total = work_ot_sum + employee.correction_normal_ot
+    weekend_ot_total = rest_ot_sum + employee.correction_weekend_ot
+    holiday_ot_total = holiday_ot_sum + employee.correction_holiday_ot
+    set_cell_number(main_sheet, "H9", normal_ot_total if normal_ot_total != 0 else None)
+    set_cell_number(main_sheet, "I9", weekend_ot_total if weekend_ot_total != 0 else None)
+    set_cell_number(main_sheet, "J9", holiday_ot_total if holiday_ot_total != 0 else None)
 
     update_overtime_sheet(overtime_sheet, employee, overtime_entries, schedule)
     set_calc_flags(workbook_root)
