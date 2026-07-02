@@ -934,7 +934,7 @@ def launch_gui() -> None:
     for tab in (check_tab, generate_tab, template_tab):
         tab.columnconfigure(1, weight=1)
     check_tab.rowconfigure(7, weight=1)
-    generate_tab.rowconfigure(9, weight=1)
+    generate_tab.rowconfigure(10, weight=1)
     template_tab.columnconfigure(1, weight=1)
     template_tab.rowconfigure(0, weight=1)
 
@@ -1074,6 +1074,11 @@ def launch_gui() -> None:
     generate_output_var = tk.StringVar()
     count_holidays_var = tk.BooleanVar(value=False)
     signature_scale_var = tk.StringVar(value="100")
+    morning_start_var = tk.StringVar(value="06:00")
+    morning_end_var = tk.StringVar(value="12:00")
+    afternoon_start_var = tk.StringVar(value="14:00")
+    afternoon_end_var = tk.StringVar(value="18:00")
+    normal_hours_var = tk.StringVar(value="10")
 
     def choose_table_c() -> None:
         path = filedialog.askopenfilename(
@@ -1112,6 +1117,7 @@ def launch_gui() -> None:
         table_bs_dir_text = generate_table_bs_var.get().strip()
         output_dir_text = generate_output_var.get().strip()
         signature_scale_text = signature_scale_var.get().strip() or "100"
+        normal_hours_text = normal_hours_var.get().strip() or "10"
 
         if not table_c_text:
             messagebox.showerror("缺少汇总表", "请选择汇总表文件。")
@@ -1140,6 +1146,11 @@ def launch_gui() -> None:
                 output_dir=Path(output_dir_text) if output_dir_text else None,
                 count_holidays=count_holidays_var.get(),
                 signature_scale=signature_scale,
+                morning_start=morning_start_var.get().strip() or "06:00",
+                morning_end=morning_end_var.get().strip() or "12:00",
+                afternoon_start=afternoon_start_var.get().strip() or "14:00",
+                afternoon_end=afternoon_end_var.get().strip() or "18:00",
+                normal_hours=normal_hours_text,
             )
         except Exception as exc:
             append_log(generate_log_text, f"失败: {exc}")
@@ -1192,12 +1203,26 @@ def launch_gui() -> None:
     )
     ttk.Label(generate_tab, text="默认 100，可填 30-200").grid(row=6, column=2, sticky="w", pady=(0, 8))
 
-    generate_button = ttk.Button(generate_tab, text="开始生成考勤表", command=start_generate)
-    generate_button.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+    work_time_frame = ttk.Frame(generate_tab)
+    work_time_frame.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+    ttk.Label(work_time_frame, text="工作时间").pack(side="left")
+    ttk.Label(work_time_frame, text="上午").pack(side="left", padx=(12, 2))
+    ttk.Entry(work_time_frame, textvariable=morning_start_var, width=7).pack(side="left")
+    ttk.Label(work_time_frame, text="-").pack(side="left", padx=2)
+    ttk.Entry(work_time_frame, textvariable=morning_end_var, width=7).pack(side="left")
+    ttk.Label(work_time_frame, text="下午").pack(side="left", padx=(12, 2))
+    ttk.Entry(work_time_frame, textvariable=afternoon_start_var, width=7).pack(side="left")
+    ttk.Label(work_time_frame, text="-").pack(side="left", padx=2)
+    ttk.Entry(work_time_frame, textvariable=afternoon_end_var, width=7).pack(side="left")
+    ttk.Label(work_time_frame, text="常规小时").pack(side="left", padx=(12, 2))
+    ttk.Entry(work_time_frame, textvariable=normal_hours_var, width=6).pack(side="left")
 
-    ttk.Label(generate_tab, text="日志").grid(row=8, column=0, columnspan=3, sticky="w", pady=(0, 6))
+    generate_button = ttk.Button(generate_tab, text="开始生成考勤表", command=start_generate)
+    generate_button.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+
+    ttk.Label(generate_tab, text="日志").grid(row=9, column=0, columnspan=3, sticky="w", pady=(0, 6))
     generate_log_text = tk.Text(generate_tab, height=14, wrap="word", state="disabled")
-    generate_log_text.grid(row=9, column=0, columnspan=3, sticky="nsew")
+    generate_log_text.grid(row=10, column=0, columnspan=3, sticky="nsew")
 
     template_left = ttk.Frame(template_tab)
     template_right = ttk.Frame(template_tab)

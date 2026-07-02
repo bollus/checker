@@ -35,10 +35,11 @@ ET.register_namespace("a", A_NS)
 ET.register_namespace("r", R_NS)
 
 
-DAY_START = Decimal("0.25")
-LUNCH_START = Decimal("0.5")
-LUNCH_END = Decimal("0.583333333333333")
-HOURS_PER_DAY = Decimal("10")
+DEFAULT_MORNING_START = "06:00"
+DEFAULT_MORNING_END = "12:00"
+DEFAULT_AFTERNOON_START = "14:00"
+DEFAULT_AFTERNOON_END = "18:00"
+DEFAULT_NORMAL_HOURS = Decimal("10")
 WINDOW_PAYABLE_CODES = {"V", "S"}
 PAYABLE_CODES = {"V", "S"}
 LEAVE_LABELS = {
@@ -52,6 +53,56 @@ SIGNATURE_MEDIA_WIDTH = 900
 SIGNATURE_MEDIA_HEIGHT = 260
 MIN_SIGNATURE_SCALE = 30
 MAX_SIGNATURE_SCALE = 200
+
+
+@dataclass(frozen=True)
+class WorkSchedule:
+    morning_start: Decimal
+    morning_end: Decimal
+    afternoon_start: Decimal
+    afternoon_end: Decimal
+    normal_hours: Decimal
+
+    @property
+    def morning_hours(self) -> Decimal:
+        return (self.morning_end - self.morning_start) * Decimal("24")
+
+
+def parse_time_to_day_fraction(value: str) -> Decimal:
+    text = (value or "").strip()
+    match = re.fullmatch(r"(\d{1,2}):(\d{2})", text)
+    if not match:
+        raise WorkbookError(f"时间格式无效: {value!r}，请使用 HH:MM，例如 06:00")
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        raise WorkbookError(f"时间超出范围: {value!r}")
+    return (Decimal(hour) + Decimal(minute) / Decimal("60")) / Decimal("24")
+
+
+def build_work_schedule(
+    morning_start: str = DEFAULT_MORNING_START,
+    morning_end: str = DEFAULT_MORNING_END,
+    afternoon_start: str = DEFAULT_AFTERNOON_START,
+    afternoon_end: str = DEFAULT_AFTERNOON_END,
+    normal_hours: str | int | Decimal = DEFAULT_NORMAL_HOURS,
+) -> WorkSchedule:
+    try:
+        normal = Decimal(str(normal_hours).strip())
+    except Exception as exc:
+        raise WorkbookError(f"常规工作小时数无效: {normal_hours!r}") from exc
+    if normal <= 0:
+        raise WorkbookError("常规工作小时数必须大于 0")
+    schedule = WorkSchedule(
+        morning_start=parse_time_to_day_fraction(morning_start),
+        morning_end=parse_time_to_day_fraction(morning_end),
+        afternoon_start=parse_time_to_day_fraction(afternoon_start),
+        afternoon_end=parse_time_to_day_fraction(afternoon_end),
+        normal_hours=normal,
+    )
+    if not (schedule.morning_start < schedule.morning_end <= schedule.afternoon_start < schedule.afternoon_end):
+        raise WorkbookError("上下班时间顺序必须为：上午上班 < 上午下班 <= 下午上班 < 下午下班")
+    return schedule
 
 
 def col_to_num(col: str) -> int:
@@ -461,6 +512,18 @@ def parse_summary_value(raw_value: Optional[str]) -> Tuple[str, Optional[Decimal
         raise WorkbookError(f"无法解析表C考勤值: {raw_value!r}") from exc
 
 
+def parse_optional_decimal(raw_value: Optional[str]) -> Decimal:
+    if raw_value in (None, ""):
+        return Decimal("0")
+    text = str(raw_value).strip()
+    if text in {"", "\\"}:
+        return Decimal("0")
+    try:
+        return Decimal(text)
+    except Exception as exc:
+        raise WorkbookError(f"无法解析数字: {raw_value!r}") from exc
+
+
 @dataclass
 class SummaryEmployee:
     row_num: int
@@ -474,6 +537,10 @@ class SummaryEmployee:
     position: str
     joining_date: Optional[str]
     days: Dict[int, Tuple[str, Optional[Decimal]]]
+    correction_nwh: Decimal
+    correction_normal_ot: Decimal
+    correction_weekend_ot: Decimal
+    correction_holiday_ot: Decimal
 
 
 def read_summary(summary_path: Path) -> Tuple[SpreadsheetZip, WorkbookSheet, List[Tuple[str, int, str]], List[SummaryEmployee]]:
@@ -512,6 +579,10 @@ def read_summary(summary_path: Path) -> Tuple[SpreadsheetZip, WorkbookSheet, Lis
                 position=position,
                 joining_date=summary_sheet.get_value(f"I{row_num}"),
                 days=days,
+                correction_nwh=parse_optional_decimal(summary_sheet.get_value(f"BQ{row_num}")),
+                correction_normal_ot=parse_optional_decimal(summary_sheet.get_value(f"BR{row_num}")),
+                correction_weekend_ot=parse_optional_decimal(summary_sheet.get_value(f"BS{row_num}")),
+                correction_holiday_ot=parse_optional_decimal(summary_sheet.get_value(f"BT{row_num}")),
             )
         )
         row_num += 1
@@ -525,13 +596,16 @@ def build_output_name(employee: SummaryEmployee, suffix: str) -> str:
     return f"{employee.no}.{name}-{position}{suffix}"
 
 
-def day_time_inputs(total_hours: Decimal) -> Tuple[Optional[Decimal], Optional[Decimal], Optional[Decimal], Optional[Decimal]]:
+def day_time_inputs(
+    total_hours: Decimal,
+    schedule: WorkSchedule,
+) -> Tuple[Optional[Decimal], Optional[Decimal], Optional[Decimal], Optional[Decimal]]:
     if total_hours <= 0:
         return None, None, None, None
-    if total_hours <= 6:
-        return DAY_START, None, None, DAY_START + total_hours / Decimal("24")
-    finish = LUNCH_END + (total_hours - Decimal("6")) / Decimal("24")
-    return DAY_START, LUNCH_START, LUNCH_END, finish
+    if total_hours <= schedule.morning_hours:
+        return schedule.morning_start, None, None, schedule.morning_start + total_hours / Decimal("24")
+    finish = schedule.afternoon_start + (total_hours - schedule.morning_hours) / Decimal("24")
+    return schedule.morning_start, schedule.morning_end, schedule.afternoon_start, finish
 
 
 def weekday_name(day: date) -> str:
@@ -548,6 +622,7 @@ def fill_row(
     payable_context: Tuple[Optional[int], Optional[int], bool, bool],
     count_holidays: bool,
     unpaid_adjacent_special_days: set[int],
+    schedule: WorkSchedule,
 ) -> Tuple[bool, Decimal, Decimal, Decimal, Decimal]:
     first_active, last_active, prefix_unpaid, suffix_unpaid = payable_context
     row_refs = [f"{col}{row_num}" for col in "ABCDEFGHIJKNOPQRT"]
@@ -570,15 +645,15 @@ def fill_row(
     payable = False
 
     if entry_type == "hours" and total_hours is not None and total_hours > 0:
-        c_value, d_value, e_value, f_value = day_time_inputs(total_hours)
+        c_value, d_value, e_value, f_value = day_time_inputs(total_hours, schedule)
         set_cell_number(sheet, f"C{row_num}", c_value)
         set_cell_number(sheet, f"D{row_num}", d_value)
         set_cell_number(sheet, f"E{row_num}", e_value)
         set_cell_number(sheet, f"F{row_num}", f_value)
         set_cell_number(sheet, f"N{row_num}", f_value)
         if day_type == "work":
-            work_hours = min(total_hours, HOURS_PER_DAY)
-            work_ot = max(total_hours - HOURS_PER_DAY, Decimal("0"))
+            work_hours = min(total_hours, schedule.normal_hours)
+            work_ot = max(total_hours - schedule.normal_hours, Decimal("0"))
         elif day_type == "rest":
             rest_hours = total_hours
         else:
@@ -633,22 +708,32 @@ def update_overtime_sheet(
     overtime_sheet: Optional[SheetXml],
     employee: SummaryEmployee,
     overtime_entries: List[OvertimeEntry],
+    schedule: WorkSchedule,
 ) -> None:
     if overtime_sheet is None:
         return
     set_cell_text(overtime_sheet, "B5", employee.name)
     set_cell_text(overtime_sheet, "B7", employee.project)
     set_cell_text(overtime_sheet, "I7", employee.position)
-    for row in range(12, 43):
+    correction_row = find_correction_row(overtime_sheet)
+    detail_end_row = (correction_row - 1) if correction_row is not None else 42
+    for row in range(12, detail_end_row + 1):
         for col in ["A", "B", "E", "H", "I", "J"]:
             set_cell_number(overtime_sheet, f"{col}{row}", None)
-    for row, entry in enumerate(overtime_entries[:31], start=12):
+    if correction_row is not None:
+        for col in ["H", "I", "J"]:
+            set_cell_number(overtime_sheet, f"{col}{correction_row}", None)
+    for row, entry in enumerate(overtime_entries[: detail_end_row - 11], start=12):
         set_cell_number(overtime_sheet, f"A{row}", date_to_excel_serial(entry.day))
         set_cell_number(overtime_sheet, f"B{row}", entry.start)
         set_cell_number(overtime_sheet, f"E{row}", entry.end)
         set_cell_number(overtime_sheet, f"H{row}", entry.normal_hours if entry.normal_hours > 0 else None)
         set_cell_number(overtime_sheet, f"I{row}", entry.weekend_hours if entry.weekend_hours > 0 else None)
         set_cell_number(overtime_sheet, f"J{row}", entry.holiday_hours if entry.holiday_hours > 0 else None)
+    if correction_row is not None:
+        set_cell_number(overtime_sheet, f"H{correction_row}", employee.correction_normal_ot if employee.correction_normal_ot != 0 else None)
+        set_cell_number(overtime_sheet, f"I{correction_row}", employee.correction_weekend_ot if employee.correction_weekend_ot != 0 else None)
+        set_cell_number(overtime_sheet, f"J{correction_row}", employee.correction_holiday_ot if employee.correction_holiday_ot != 0 else None)
 
     normal_total = sum((entry.normal_hours for entry in overtime_entries), Decimal("0"))
     weekend_total = sum((entry.weekend_hours for entry in overtime_entries), Decimal("0"))
@@ -656,9 +741,9 @@ def update_overtime_sheet(
     set_cell_number(overtime_sheet, "H43", normal_total if normal_total > 0 else None)
     set_cell_number(overtime_sheet, "I43", weekend_total if weekend_total > 0 else None)
     set_cell_number(overtime_sheet, "J43", holiday_total if holiday_total > 0 else None)
-    set_cell_number(overtime_sheet, "H44", normal_total / HOURS_PER_DAY if normal_total > 0 else None)
-    set_cell_number(overtime_sheet, "I44", weekend_total / HOURS_PER_DAY if weekend_total > 0 else None)
-    set_cell_number(overtime_sheet, "J44", holiday_total / HOURS_PER_DAY if holiday_total > 0 else None)
+    set_cell_number(overtime_sheet, "H44", normal_total / schedule.normal_hours if normal_total > 0 else None)
+    set_cell_number(overtime_sheet, "I44", weekend_total / schedule.normal_hours if weekend_total > 0 else None)
+    set_cell_number(overtime_sheet, "J44", holiday_total / schedule.normal_hours if holiday_total > 0 else None)
 
 
 def sheet_drawing_part(book: SpreadsheetZip, sheet_part: str, sheet: SheetXml) -> Optional[str]:
@@ -744,6 +829,14 @@ def choose_template_sheet(sheets: List[WorkbookSheet], sheet_name: str) -> Optio
     return None
 
 
+def find_correction_row(sheet: SheetXml, start_row: int = 35, end_row: int = 45) -> Optional[int]:
+    for row in range(start_row, end_row + 1):
+        text = sheet.get_value(f"A{row}") or ""
+        if "修正上月加班" in str(text) or "FIX OT" in str(text).upper():
+            return row
+    return None
+
+
 def write_employee_workbook(
     template_path: Path,
     employee: SummaryEmployee,
@@ -751,7 +844,9 @@ def write_employee_workbook(
     output_dir: Path,
     count_holidays: bool = False,
     signature_scale: int = 100,
+    schedule: Optional[WorkSchedule] = None,
 ) -> Path:
+    schedule = schedule or build_work_schedule()
     book = SpreadsheetZip(template_path)
     workbook_root = book.load_xml("xl/workbook.xml")
     sheets = workbook_sheets(book)
@@ -766,10 +861,11 @@ def write_employee_workbook(
     month_start = excel_serial_to_date(month_serial)
     month_days = (date(month_start.year + (month_start.month // 12), ((month_start.month % 12) + 1), 1) - timedelta(days=1)).day
 
-    if month_days != len(day_headers):
+    if month_days > len(day_headers):
         raise WorkbookError(
             f"模板月份天数({month_days})与表C日期列数量({len(day_headers)})不一致，请确认模板月份是否正确"
         )
+    day_headers = day_headers[:month_days]
 
     holiday_days = [day for _, day, kind in day_headers if kind == "holiday"]
     rest_days = [day for _, day, kind in day_headers if kind == "rest"]
@@ -785,9 +881,10 @@ def write_employee_workbook(
     set_cell_text(main_sheet, "I3", employee.crew_group)
     set_cell_text(main_sheet, "J3", employee.employee_no)
     set_cell_text(main_sheet, "N7", rest_weekday)
-    set_cell_number(main_sheet, "N8", HOURS_PER_DAY)
+    set_cell_number(main_sheet, "N8", schedule.normal_hours)
     signature = signature_text(employee.name)
     signature_png = render_signature_png(signature, signature_scale)
+    main_correction_row = find_correction_row(main_sheet)
 
     for row in range(50, 71):
         set_cell_number(main_sheet, f"J{row}", None)
@@ -859,6 +956,7 @@ def write_employee_workbook(
             (first_active, last_active, prefix_unpaid, suffix_unpaid),
             count_holidays,
             unpaid_adjacent_special_days,
+            schedule,
         )
         payable_total += 1 if payable else 0
         work_sum += work_hours
@@ -867,10 +965,10 @@ def write_employee_workbook(
         holiday_ot_sum += holiday_hours
         if work_ot > 0 or rest_hours > 0 or holiday_hours > 0:
             if day_type == "work":
-                start_time = LUNCH_END + HOURS_PER_DAY / Decimal("24")
+                start_time = schedule.afternoon_start + schedule.normal_hours / Decimal("24")
                 end_time = start_time + work_ot / Decimal("24")
             else:
-                start_time, _, _, end_time = day_time_inputs(total_hours or Decimal("0"))
+                start_time, _, _, end_time = day_time_inputs(total_hours or Decimal("0"), schedule)
             overtime_entries.append(
                 OvertimeEntry(
                     day=current_date,
@@ -890,12 +988,20 @@ def write_employee_workbook(
 
     for day_number in range(len(day_headers) + 1, 32):
         row = 9 + day_number
+        if row == main_correction_row:
+            continue
         for col in ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "N", "O", "P", "Q", "R", "T"]:
             ref = f"{col}{row}"
             if col == "K":
                 set_cell_text(main_sheet, ref, None)
             else:
                 set_cell_number(main_sheet, ref, None)
+
+    if main_correction_row is not None:
+        set_cell_number(main_sheet, f"G{main_correction_row}", employee.correction_nwh if employee.correction_nwh != 0 else None)
+        set_cell_number(main_sheet, f"H{main_correction_row}", employee.correction_normal_ot if employee.correction_normal_ot != 0 else None)
+        set_cell_number(main_sheet, f"I{main_correction_row}", employee.correction_weekend_ot if employee.correction_weekend_ot != 0 else None)
+        set_cell_number(main_sheet, f"J{main_correction_row}", employee.correction_holiday_ot if employee.correction_holiday_ot != 0 else None)
 
     public_payable = 0
     rest_payable = 0
@@ -915,7 +1021,7 @@ def write_employee_workbook(
         if kind == "rest" and main_sheet.get_value(f"T{9 + day_number}") not in (None, ""):
             rest_payable += 1
 
-    work_day_count = (work_sum / HOURS_PER_DAY).to_integral_value(rounding=ROUND_CEILING) if work_sum > 0 else Decimal("0")
+    work_day_count = (work_sum / schedule.normal_hours).to_integral_value(rounding=ROUND_CEILING) if work_sum > 0 else Decimal("0")
     public_day_count = Decimal(public_attendance if count_holidays else public_payable)
     vacation_day_count = Decimal(vacation_days)
     sick_day_count = Decimal(0 if count_holidays else sick_days)
@@ -932,11 +1038,12 @@ def write_employee_workbook(
     set_cell_number(main_sheet, "K6", sick_day_count if sick_day_count > 0 else None)
     set_cell_number(main_sheet, "L6", rest_day_count if rest_day_count > 0 else None)
     set_cell_number(main_sheet, "M6", None if count_holidays else (emergency_days if emergency_days > 0 else None))
+    set_cell_number(main_sheet, "G9", work_sum if work_sum > 0 else None)
     set_cell_number(main_sheet, "H9", work_ot_sum if work_ot_sum > 0 else None)
     set_cell_number(main_sheet, "I9", rest_ot_sum if rest_ot_sum > 0 else None)
     set_cell_number(main_sheet, "J9", holiday_ot_sum if holiday_ot_sum > 0 else None)
 
-    update_overtime_sheet(overtime_sheet, employee, overtime_entries)
+    update_overtime_sheet(overtime_sheet, employee, overtime_entries, schedule)
     set_calc_flags(workbook_root)
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1006,12 +1113,14 @@ def create_generation_report(
     template_path: Path,
     count_holidays: bool,
     signature_scale: int,
+    schedule: WorkSchedule,
 ) -> None:
     lines = [
         f"模板表B: {template_path}",
         f"生成数量: {len(generated_files)}",
         f"是否统计假期: {'是' if count_holidays else '否'}",
         f"签名大小: {signature_scale}%",
+        f"常规工作小时数: {decimal_to_text(schedule.normal_hours)}",
         "默认规则:",
         "- V(年休假) 计入可支付天数",
         "- S(病假) 计入可支付天数",
@@ -1030,8 +1139,14 @@ def run_generate(
     output_dir: Optional[Path] = None,
     count_holidays: bool = False,
     signature_scale: int = 100,
+    morning_start: str = DEFAULT_MORNING_START,
+    morning_end: str = DEFAULT_MORNING_END,
+    afternoon_start: str = DEFAULT_AFTERNOON_START,
+    afternoon_end: str = DEFAULT_AFTERNOON_END,
+    normal_hours: str | int | Decimal = DEFAULT_NORMAL_HOURS,
 ) -> Tuple[Path, List[Path], Path]:
     signature_scale = validate_signature_scale(signature_scale)
+    schedule = build_work_schedule(morning_start, morning_end, afternoon_start, afternoon_end, normal_hours)
     _, _, day_headers, employees = read_summary(table_c_path)
     output = output_dir or next_output_dir(table_c_path)
     generated_files: List[Path] = []
@@ -1044,10 +1159,11 @@ def run_generate(
                 output,
                 count_holidays=count_holidays,
                 signature_scale=signature_scale,
+                schedule=schedule,
             )
         )
     report_path = output / "生成说明.txt"
-    create_generation_report(report_path, generated_files, template_b_path, count_holidays, signature_scale)
+    create_generation_report(report_path, generated_files, template_b_path, count_holidays, signature_scale, schedule)
     return output, generated_files, report_path
 
 
@@ -1059,6 +1175,11 @@ def cli() -> int:
     parser.add_argument("--output-dir", help="输出目录")
     parser.add_argument("--count-holidays", action="store_true", help="按实际出勤统计 I6 法定假和 L6 周末假，并将 K6/M6 写为 0")
     parser.add_argument("--signature-scale", type=int, default=100, help="签名大小百分比，默认 100，可选 30-200")
+    parser.add_argument("--morning-start", default=DEFAULT_MORNING_START, help="上午上班时间，默认 06:00")
+    parser.add_argument("--morning-end", default=DEFAULT_MORNING_END, help="上午下班时间，默认 12:00")
+    parser.add_argument("--afternoon-start", default=DEFAULT_AFTERNOON_START, help="下午上班时间，默认 14:00")
+    parser.add_argument("--afternoon-end", default=DEFAULT_AFTERNOON_END, help="下午下班时间，默认 18:00")
+    parser.add_argument("--normal-hours", default=str(DEFAULT_NORMAL_HOURS), help="常规工作小时数，默认 10")
     args = parser.parse_args()
 
     template_path = choose_template_file(args.template_b, args.table_bs_dir)
@@ -1068,6 +1189,11 @@ def cli() -> int:
         output_dir=Path(args.output_dir) if args.output_dir else None,
         count_holidays=args.count_holidays,
         signature_scale=args.signature_scale,
+        morning_start=args.morning_start,
+        morning_end=args.morning_end,
+        afternoon_start=args.afternoon_start,
+        afternoon_end=args.afternoon_end,
+        normal_hours=args.normal_hours,
     )
     print(f"输出目录: {output_dir}")
     print(f"生成数量: {len(generated_files)}")
