@@ -273,18 +273,13 @@ function DetailPanel({
   const latestPath = selectedHistory?.outputPath || checkResult?.output_path || generateResult?.output_dir || "";
   const reportPath = selectedHistory?.reportPath || checkResult?.report_path || generateResult?.report_path || "";
   const title = page === "templates" ? "模板状态" : "任务详情";
+  const isWorking = busy !== "idle";
 
   return (
     <aside className="details-pane">
       <div className="pane-title">
         <span>{title}</span>
         <Clock3 size={16} />
-      </div>
-
-      <div className="status-card">
-        {busy !== "idle" ? <Loader2 className="spin" size={28} /> : <CheckCircle2 size={28} />}
-        <strong>{busy === "checking" ? "正在核对" : busy === "generating" ? "正在生成" : "准备就绪"}</strong>
-        <span>{page === "templates" ? `${selectedTemplate.rules.length} 条规则` : "文件只在本机处理"}</span>
       </div>
 
       {page === "templates" ? (
@@ -294,11 +289,26 @@ function DetailPanel({
           <div><span>起始行</span><strong>{selectedTemplate.start_row}</strong></div>
           <div><span>模板校验</span><strong>保存时执行</strong></div>
         </div>
+      ) : page === "generate" ? (
+        <div className="metric-list">
+          <div><span>任务状态</span><strong>{busy === "generating" ? "正在生成" : generateResult ? "生成完成" : "未开始"}</strong></div>
+          <div><span>生成数量</span><strong>{generateResult ? `${generateResult.generated_count} 份` : "0 份"}</strong></div>
+          <div><span>输出目录</span><strong>{generateResult ? shortPath(generateResult.output_dir) : "未生成"}</strong></div>
+          <div><span>报告</span><strong>{generateResult ? fileName(generateResult.report_path) : "未生成"}</strong></div>
+        </div>
+      ) : page === "history" ? (
+        <div className="metric-list">
+          <div><span>选中任务</span><strong>{selectedHistory ? selectedHistory.type : "未选择"}</strong></div>
+          <div><span>任务时间</span><strong>{selectedHistory ? selectedHistory.time : "无"}</strong></div>
+          <div><span>状态</span><strong>{selectedHistory ? selectedHistory.status : "无"}</strong></div>
+          <div><span>结果</span><strong>{selectedHistory?.mismatchCount !== undefined ? `${selectedHistory.mismatchCount} 个不一致` : selectedHistory?.generatedCount !== undefined ? `${selectedHistory.generatedCount} 份` : "无"}</strong></div>
+        </div>
       ) : (
         <div className="metric-list">
-          <div><span>模板</span><strong>{selectedTemplate.name}</strong></div>
-          <div><span>核对结果</span><strong>{checkResult ? `${checkResult.mismatch_count} 个不一致` : "未开始"}</strong></div>
-          <div><span>生成结果</span><strong>{generateResult ? `${generateResult.generated_count} 份` : "未开始"}</strong></div>
+          <div><span>任务状态</span><strong>{busy === "checking" ? "正在核对" : checkResult ? "核对完成" : "未开始"}</strong></div>
+          <div><span>核对模板</span><strong>{selectedTemplate.name}</strong></div>
+          <div><span>不一致数量</span><strong>{checkResult ? `${checkResult.mismatch_count} 个` : "0 个"}</strong></div>
+          <div><span>结果文件</span><strong>{checkResult ? fileName(checkResult.output_path) : "未生成"}</strong></div>
         </div>
       )}
 
@@ -324,6 +334,7 @@ function DetailPanel({
         <span>运行记录</span>
       </div>
       <div className="log-list">
+        {isWorking ? <p className="running-line"><Loader2 className="spin" size={13} />任务处理中</p> : null}
         {log.length === 0 ? <span className="muted">暂无记录</span> : log.slice(-8).map((item, index) => <p key={index}>{item}</p>)}
       </div>
     </aside>

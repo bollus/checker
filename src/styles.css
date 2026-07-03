@@ -364,7 +364,6 @@ nav button.active {
 .history-detail,
 .data-table,
 .editable-table,
-.status-card,
 .examples-box {
   border: 1px solid #e2e8f2;
   border-radius: 16px;
@@ -531,25 +530,6 @@ nav button.active {
   font-size: 15px;
 }
 
-.status-card {
-  display: grid;
-  place-items: center;
-  gap: 8px;
-  min-height: 152px;
-  color: #68758d;
-  text-align: center;
-  background: #f8faff;
-}
-
-.status-card svg {
-  color: #6266f1;
-}
-
-.status-card strong {
-  color: #182033;
-  font-size: 21px;
-}
-
 .metric-list {
   display: grid;
   gap: 8px;
@@ -608,6 +588,14 @@ nav button.active {
 .log-list p {
   color: #68758d;
   font-size: 12px;
+}
+
+.running-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #4e56e8 !important;
+  font-weight: 800;
 }
 
 .template-meta {
