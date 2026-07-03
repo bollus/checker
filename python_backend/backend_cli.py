@@ -198,6 +198,24 @@ def action_validate_template(payload: Dict[str, Any]) -> Dict[str, Any]:
     return ok({"rule_count": len(parsed), "template": check_tool.template_to_dict(template)})
 
 
+def action_load_template_file(payload: Dict[str, Any]) -> Dict[str, Any]:
+    data = json.loads(Path(payload["path"]).read_text(encoding="utf-8"))
+    if isinstance(data, list):
+        templates = [check_tool.template_to_dict(check_tool.check_template_from_dict(item)) for item in data if isinstance(item, dict)]
+    elif isinstance(data, dict):
+        templates = [check_tool.template_to_dict(check_tool.check_template_from_dict(data))]
+    else:
+        raise check_tool.WorkbookError("模板文件格式无效")
+    return ok({"templates": templates})
+
+
+def action_export_template_file(payload: Dict[str, Any]) -> Dict[str, Any]:
+    template = check_tool.check_template_from_dict(payload["template"])
+    path = Path(payload["path"])
+    path.write_text(json.dumps(check_tool.template_to_dict(template), ensure_ascii=False, indent=2), encoding="utf-8")
+    return ok({"path": str(path)})
+
+
 ACTIONS = {
     "check": action_check,
     "generate": action_generate,
@@ -206,6 +224,8 @@ ACTIONS = {
     "delete_template": action_delete_template,
     "inspect_workbook": action_inspect_workbook,
     "validate_template": action_validate_template,
+    "load_template_file": action_load_template_file,
+    "export_template_file": action_export_template_file,
 }
 
 
