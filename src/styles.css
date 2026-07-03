@@ -59,10 +59,74 @@ input[readonly] {
   background: #f6f8fc;
 }
 
+.custom-select {
+  position: relative;
+  min-width: 0;
+}
+
+.custom-select > button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  height: 38px;
+  padding: 0 12px;
+  color: #182033;
+  border: 1px solid #dfe5f1;
+  border-radius: 10px;
+  background: #ffffff;
+  text-align: left;
+}
+
+.custom-select > button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.custom-select:focus-within > button {
+  border-color: #6d68f3;
+  box-shadow: 0 0 0 3px rgba(109, 104, 243, 0.12);
+}
+
+.select-menu {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  display: grid;
+  max-height: 230px;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid #dfe5f1;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 18px 36px rgba(34, 45, 76, 0.16);
+}
+
+.select-menu button {
+  display: flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 10px;
+  color: #39465e;
+  border-radius: 8px;
+  background: transparent;
+  text-align: left;
+}
+
+.select-menu button:hover,
+.select-menu button.selected {
+  color: #3f45dc;
+  background: #eef1ff;
+}
+
 label {
   min-width: 0;
-  color: #6c778f;
-  font-size: 12px;
+  color: #536179;
+  font-size: 13px;
   font-weight: 760;
 }
 
@@ -278,9 +342,8 @@ nav button.active {
 }
 
 .page-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 24px;
   min-width: 0;
 }
@@ -301,7 +364,8 @@ nav button.active {
 
 .header-actions {
   flex-wrap: wrap;
-  justify-content: flex-end;
+  justify-content: flex-start;
+  min-width: 0;
 }
 
 .primary-button,
@@ -363,8 +427,7 @@ nav button.active {
 .settings-section,
 .history-detail,
 .data-table,
-.editable-table,
-.examples-box {
+.editable-table {
   border: 1px solid #e2e8f2;
   border-radius: 16px;
   background: rgba(255, 255, 255, 0.9);
@@ -387,7 +450,9 @@ nav button.active {
 }
 
 .form-row label {
-  color: #59657c;
+  color: #43506a;
+  font-size: 13px;
+  font-weight: 820;
 }
 
 .form-row > svg {
@@ -425,20 +490,31 @@ nav button.active {
 }
 
 .settings-strip {
-  display: grid;
-  grid-template-columns: repeat(7, minmax(96px, 1fr));
+  display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   padding: 14px;
+  min-width: 0;
 }
 
 .settings-strip.tight {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
   box-shadow: none;
 }
 
 .settings-strip label {
   display: grid;
   gap: 6px;
+  flex: 1 1 120px;
+  min-width: 0;
+  color: #43506a;
+  font-size: 13px;
+  font-weight: 820;
+}
+
+.settings-strip .check-label {
+  flex: 0 0 110px;
+  height: 62px;
+  align-self: end;
 }
 
 .section-head {
@@ -475,6 +551,10 @@ nav button.active {
   text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.data-table td {
+  font-size: 13px;
 }
 
 .data-table th {
@@ -570,13 +650,6 @@ nav button.active {
   background: #f5f7fb;
 }
 
-.examples-box {
-  display: grid;
-  gap: 8px;
-  padding: 14px;
-  background: #fbfcff;
-}
-
 .log-list {
   display: grid;
   gap: 8px;
@@ -628,6 +701,7 @@ nav button.active {
 
 .editable-row {
   border-top: 1px solid #edf1f7;
+  font-size: 13px;
 }
 
 .editable-row > input[type="checkbox"] {
@@ -639,7 +713,8 @@ nav button.active {
 }
 
 .editable-row input,
-.editable-row select {
+.editable-row select,
+.editable-row .custom-select {
   width: 100%;
 }
 
@@ -714,15 +789,6 @@ nav button.active {
     grid-template-columns: 216px minmax(0, 1fr) 270px;
   }
 
-  .page-header {
-    flex-direction: column;
-    gap: 14px;
-  }
-
-  .header-actions {
-    justify-content: flex-start;
-  }
-
   .panel,
   .history-layout,
   .settings-layout {
@@ -731,6 +797,6 @@ nav button.active {
 
   .settings-strip,
   .settings-strip.tight {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    display: flex;
   }
 }

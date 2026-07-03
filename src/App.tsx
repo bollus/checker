@@ -4,6 +4,7 @@ import {
   AlertCircle,
   Archive,
   CheckCircle2,
+  ChevronDown,
   Clock3,
   Copy,
   Download,
@@ -229,6 +230,46 @@ function Toggle({
   );
 }
 
+function CustomSelect({
+  value,
+  options,
+  onChange,
+}: {
+  value: string;
+  options: { value: string; label: string }[];
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const selected = options.find((item) => item.value === value) || options[0];
+
+  return (
+    <div className="custom-select" tabIndex={0} onBlur={() => setOpen(false)}>
+      <button type="button" onClick={() => setOpen((current) => !current)}>
+        <span>{selected?.label || "请选择"}</span>
+        <ChevronDown size={16} />
+      </button>
+      {open ? (
+        <div className="select-menu">
+          {options.map((option) => (
+            <button
+              className={option.value === value ? "selected" : ""}
+              key={option.value}
+              type="button"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => {
+                onChange(option.value);
+                setOpen(false);
+              }}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function TitleBar() {
   const appWindow = getCurrentWindow();
 
@@ -312,31 +353,31 @@ function DetailPanel({
         </div>
       )}
 
-      <div className="action-stack">
-        <button disabled={!latestPath} onClick={() => openPath(latestPath)}>
-          <ExternalLink size={16} />打开结果
-        </button>
-        <button disabled={!latestPath} onClick={() => revealPath(latestPath)}>
-          <FolderOpen size={16} />定位文件
-        </button>
-        <button disabled={!reportPath} onClick={() => openPath(reportPath)}>
-          <FileCheck2 size={16} />打开报告
-        </button>
-      </div>
+      {latestPath || reportPath ? (
+        <div className="action-stack">
+          <button disabled={!latestPath} onClick={() => openPath(latestPath)}>
+            <ExternalLink size={16} />打开结果
+          </button>
+          <button disabled={!latestPath} onClick={() => revealPath(latestPath)}>
+            <FolderOpen size={16} />定位文件
+          </button>
+          <button disabled={!reportPath} onClick={() => openPath(reportPath)}>
+            <FileCheck2 size={16} />打开报告
+          </button>
+        </div>
+      ) : null}
 
-      <div className="examples-box">
-        <strong>表达式示例</strong>
-        <code>F3-Fn</code>
-        <code>SUM(H10:Hn,I10:In)</code>
-      </div>
-
-      <div className="pane-title small">
-        <span>运行记录</span>
-      </div>
-      <div className="log-list">
-        {isWorking ? <p className="running-line"><Loader2 className="spin" size={13} />任务处理中</p> : null}
-        {log.length === 0 ? <span className="muted">暂无记录</span> : log.slice(-8).map((item, index) => <p key={index}>{item}</p>)}
-      </div>
+      {isWorking || log.length ? (
+        <>
+          <div className="pane-title small">
+            <span>运行记录</span>
+          </div>
+          <div className="log-list">
+            {isWorking ? <p className="running-line"><Loader2 className="spin" size={13} />任务处理中</p> : null}
+            {log.slice(-8).map((item, index) => <p key={index}>{item}</p>)}
+          </div>
+        </>
+      ) : null}
     </aside>
   );
 }
@@ -484,9 +525,11 @@ function CheckPage({
         <PathRow label="考勤表目录" value={tableBs} kind="folder" placeholder={settings.defaultAttendanceDir || "选择考勤表目录"} onChange={setTableBs} />
         <div className="form-row">
           <label>核对模板</label>
-          <select value={selectedTemplate.name} onChange={(event) => setTemplateName(event.target.value)}>
-            {templates.map((template) => <option key={template.name} value={template.name}>{template.name}</option>)}
-          </select>
+          <CustomSelect
+            value={selectedTemplate.name}
+            options={templates.map((template) => ({ value: template.name, label: template.name }))}
+            onChange={setTemplateName}
+          />
           <LayoutTemplate size={17} />
         </div>
         <PathRow label="结果另存为" value={output} kind="save" extensions={["xlsx"]} placeholder={settings.defaultOutputDir || "留空则自动生成结果文件"} onChange={setOutput} />
@@ -787,7 +830,7 @@ function TemplatesPage({
       />
 
       <div className="template-meta">
-        <label>当前模板<select value={current.name} onChange={(event) => setCurrent(templates.find((item) => item.name === event.target.value) || current)}>{templates.map((template) => <option key={template.name} value={template.name}>{template.name}</option>)}</select></label>
+        <label>当前模板<CustomSelect value={current.name} options={templates.map((template) => ({ value: template.name, label: template.name }))} onChange={(value) => setCurrent(templates.find((item) => item.name === value) || current)} /></label>
         <label>模板名称<input value={current.name} onChange={(event) => setCurrent({ ...current, name: event.target.value })} /></label>
         <label>编号列<input value={current.number_column} onChange={(event) => setCurrent({ ...current, number_column: event.target.value.toUpperCase() })} /></label>
         <label>数据起始行<input type="number" value={current.start_row} onChange={(event) => setCurrent({ ...current, start_row: Number(event.target.value) })} /></label>
@@ -811,9 +854,11 @@ function TemplatesPage({
             <input value={rule.field_name} onChange={(event) => updateRule(index, { field_name: event.target.value })} />
             <input value={rule.main_range} onChange={(event) => updateRule(index, { main_range: event.target.value.toUpperCase() })} />
             <input value={rule.table_b_cell} onChange={(event) => updateRule(index, { table_b_cell: event.target.value.toUpperCase() })} />
-            <select value={rule.compare_type} onChange={(event) => updateRule(index, { compare_type: event.target.value as CompareType })}>
-              {compareOptions.map((option) => <option key={option} value={option}>{compareLabels[option]}</option>)}
-            </select>
+            <CustomSelect
+              value={rule.compare_type}
+              options={compareOptions.map((option) => ({ value: option, label: compareLabels[option] }))}
+              onChange={(value) => updateRule(index, { compare_type: value as CompareType })}
+            />
             <input placeholder="可选" />
             <div className="row-actions">
               <button onClick={() => setCurrent({ ...current, rules: [...current.rules, { ...rule, field_name: `${rule.field_name} 副本` }] })}><Copy size={14} /></button>
