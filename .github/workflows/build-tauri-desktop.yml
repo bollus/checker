@@ -40,9 +40,24 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Cache Tauri tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\AppData\Local\tauri
+          key: tauri-tools-windows-${{ hashFiles('src-tauri/tauri.conf.json', 'package-lock.json') }}
+          restore-keys: |
+            tauri-tools-windows-
 
       - name: Install dependencies
         run: |
@@ -91,9 +106,25 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Cache Tauri tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/tauri
+            ~/Library/Caches/tauri
+          key: tauri-tools-macos-${{ hashFiles('src-tauri/tauri.conf.json', 'package-lock.json') }}
+          restore-keys: |
+            tauri-tools-macos-
 
       - name: Install dependencies
         run: |

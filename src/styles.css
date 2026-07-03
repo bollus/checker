@@ -105,34 +105,86 @@ code {
   font-size: 12px;
 }
 
-.app-shell {
-  display: grid;
-  grid-template-columns: 236px minmax(0, 1fr) 290px;
+.app-frame {
   width: 100vw;
   height: 100vh;
   overflow: hidden;
   background:
-    radial-gradient(circle at 0 0, rgba(123, 138, 255, 0.18), transparent 32%),
+    radial-gradient(circle at 0 0, rgba(123, 138, 255, 0.16), transparent 30%),
     linear-gradient(180deg, #fbfcff 0%, #f6f8fc 100%);
+}
+
+.titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 42px;
+  padding: 0 10px 0 14px;
+  border-bottom: 1px solid #e2e7f1;
+  background: rgba(255, 255, 255, 0.9);
+  user-select: none;
+}
+
+.titlebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  color: #182033;
+  font-size: 14px;
+  font-weight: 850;
+}
+
+.titlebar .brand-mark {
+  width: 25px;
+  height: 25px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.titlebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.titlebar-actions button {
+  display: grid;
+  width: 34px;
+  height: 28px;
+  place-items: center;
+  color: #526078;
+  border-radius: 8px;
+  background: transparent;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.titlebar-actions button:hover {
+  color: #182033;
+  background: #eef2f8;
+}
+
+.titlebar-actions button.close:hover {
+  color: #ffffff;
+  background: #e64c4c;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 236px minmax(0, 1fr) 290px;
+  width: 100vw;
+  height: calc(100vh - 42px);
+  overflow: hidden;
+  background: transparent;
 }
 
 .sidebar {
   display: flex;
   flex-direction: column;
   gap: 20px;
-  padding: 24px 18px;
+  padding: 18px;
   border-right: 1px solid #e2e7f1;
   background: rgba(255, 255, 255, 0.86);
-}
-
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  height: 38px;
-  color: #182033;
-  font-size: 17px;
-  font-weight: 850;
 }
 
 .brand-mark {

@@ -1,4 +1,5 @@
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   AlertCircle,
   Archive,
@@ -14,13 +15,16 @@ import {
   Import,
   LayoutTemplate,
   Loader2,
+  Minus,
   Play,
   Plus,
   RotateCcw,
   Save,
   Search,
+  Square,
   Trash2,
   Wand2,
+  X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -222,6 +226,30 @@ function Toggle({
       <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
       <span>{label}</span>
     </label>
+  );
+}
+
+function TitleBar() {
+  const appWindow = getCurrentWindow();
+
+  return (
+    <header className="titlebar" data-tauri-drag-region="deep">
+      <div className="titlebar-brand" data-tauri-drag-region="deep">
+        <div className="brand-mark">E</div>
+        <span>表格核对工具</span>
+      </div>
+      <div className="titlebar-actions" data-tauri-drag-region="false">
+        <button type="button" onClick={() => appWindow.minimize()} title="最小化">
+          <Minus size={15} />
+        </button>
+        <button type="button" onClick={() => appWindow.toggleMaximize()} title="最大化">
+          <Square size={13} />
+        </button>
+        <button className="close" type="button" onClick={() => appWindow.close()} title="关闭">
+          <X size={15} />
+        </button>
+      </div>
+    </header>
   );
 }
 
@@ -886,33 +914,32 @@ export default function App() {
   ];
 
   return (
-    <main className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-mark">E</div>
-          <span>表格核对工具</span>
-        </div>
-        <nav>
-          {nav.map((item) => {
-            const Icon = item.icon;
-            return <button className={page === item.id ? "active" : ""} key={item.id} onClick={() => setPage(item.id)}><Icon size={17} />{item.label}</button>;
-          })}
-        </nav>
-        <div className="tip-card">
-          <AlertCircle size={17} />
-          <strong>本机运行</strong>
-          <span>文件只在你的电脑上处理，不上传。</span>
-        </div>
-      </aside>
+    <div className="app-frame">
+      <TitleBar />
+      <main className="app-shell">
+        <aside className="sidebar">
+          <nav>
+            {nav.map((item) => {
+              const Icon = item.icon;
+              return <button className={page === item.id ? "active" : ""} key={item.id} onClick={() => setPage(item.id)}><Icon size={17} />{item.label}</button>;
+            })}
+          </nav>
+          <div className="tip-card">
+            <AlertCircle size={17} />
+            <strong>本机运行</strong>
+            <span>文件只在你的电脑上处理，不上传。</span>
+          </div>
+        </aside>
 
-      <div className="content-area">
-        {page === "check" && <CheckPage templates={templates} settings={settings} busy={busy} setBusy={setBusy} addLog={addLog} addHistory={addHistory} onResult={(result) => { setCheckResult(result); setGenerateResult(null); }} />}
-        {page === "generate" && <GeneratePage settings={settings} busy={busy} setBusy={setBusy} addLog={addLog} addHistory={addHistory} onResult={(result) => { setGenerateResult(result); setCheckResult(null); }} />}
-        {page === "templates" && <TemplatesPage templates={templates} setTemplates={setTemplates} addLog={addLog} />}
-        {page === "history" && <HistoryPage history={history} selectedId={selectedHistoryId} setSelectedId={setSelectedHistoryId} clearHistory={() => { setHistory([]); setSelectedHistoryId(""); }} />}
-      </div>
+        <div className="content-area">
+          {page === "check" && <CheckPage templates={templates} settings={settings} busy={busy} setBusy={setBusy} addLog={addLog} addHistory={addHistory} onResult={(result) => { setCheckResult(result); setGenerateResult(null); }} />}
+          {page === "generate" && <GeneratePage settings={settings} busy={busy} setBusy={setBusy} addLog={addLog} addHistory={addHistory} onResult={(result) => { setGenerateResult(result); setCheckResult(null); }} />}
+          {page === "templates" && <TemplatesPage templates={templates} setTemplates={setTemplates} addLog={addLog} />}
+          {page === "history" && <HistoryPage history={history} selectedId={selectedHistoryId} setSelectedId={setSelectedHistoryId} clearHistory={() => { setHistory([]); setSelectedHistoryId(""); }} />}
+        </div>
 
-      <DetailPanel page={page} busy={busy} selectedTemplate={selectedTemplate} checkResult={checkResult} generateResult={generateResult} selectedHistory={selectedHistory} log={log} />
-    </main>
+        <DetailPanel page={page} busy={busy} selectedTemplate={selectedTemplate} checkResult={checkResult} generateResult={generateResult} selectedHistory={selectedHistory} log={log} />
+      </main>
+    </div>
   );
 }
