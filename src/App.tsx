@@ -8,7 +8,6 @@ import {
   Download,
   ExternalLink,
   FileCheck2,
-  FileCog,
   FileSpreadsheet,
   FolderOpen,
   History,
@@ -20,9 +19,7 @@ import {
   RotateCcw,
   Save,
   Search,
-  Settings,
   Trash2,
-  Upload,
   Wand2,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -36,9 +33,10 @@ import {
   Mismatch,
   openPath,
   revealPath,
+  WorkbookPreview,
 } from "./api";
 
-type Page = "check" | "generate" | "templates" | "history" | "settings";
+type Page = "check" | "generate" | "templates" | "history";
 type BusyState = "idle" | "checking" | "generating";
 type TaskStatus = "成功" | "失败" | "有警告";
 type TaskType = "工资表核对" | "生成考勤表";
@@ -70,6 +68,11 @@ interface AppSettings {
   afternoonEnd: string;
   autoOpenResult: boolean;
   keepLogDays: string;
+}
+
+interface EmployeePreviewRow {
+  row: number;
+  values: string[];
 }
 
 const DEFAULT_TEMPLATE: CheckTemplate = {
@@ -104,7 +107,7 @@ const DEFAULT_SETTINGS: AppSettings = {
 const compareLabels: Record<CompareType, string> = {
   text: "文本",
   number: "数字",
-  position: "岗位",
+  position: "文本-岗位别名",
 };
 
 const compareOptions: CompareType[] = ["text", "number", "position"];
@@ -241,7 +244,7 @@ function DetailPanel({
 }) {
   const latestPath = selectedHistory?.outputPath || checkResult?.output_path || generateResult?.output_dir || "";
   const reportPath = selectedHistory?.reportPath || checkResult?.report_path || generateResult?.report_path || "";
-  const title = page === "templates" ? "模板状态" : page === "settings" ? "环境状态" : "任务详情";
+  const title = page === "templates" ? "模板状态" : "任务详情";
 
   return (
     <aside className="details-pane">
@@ -262,13 +265,6 @@ function DetailPanel({
           <div><span>编号列</span><strong>{selectedTemplate.number_column}</strong></div>
           <div><span>起始行</span><strong>{selectedTemplate.start_row}</strong></div>
           <div><span>模板校验</span><strong>保存时执行</strong></div>
-        </div>
-      ) : page === "settings" ? (
-        <div className="metric-list">
-          <div><span>Python sidecar</span><strong>已配置</strong></div>
-          <div><span>签名字体</span><strong>已随包发布</strong></div>
-          <div><span>Tauri</span><strong>运行正常</strong></div>
-          <div><span>数据上传</span><strong>不上传</strong></div>
         </div>
       ) : (
         <div className="metric-list">
@@ -387,8 +383,6 @@ function CheckPage({
   const [output, setOutput] = useLocalState("check.output", "");
   const [templateName, setTemplateName] = useLocalState("check.template", "默认模板");
   const [autoOpen, setAutoOpen] = useLocalState("check.autoOpen", settings.autoOpenResult);
-  const [reportOnly, setReportOnly] = useLocalState("check.reportOnly", false);
-  const [overwrite, setOverwrite] = useLocalState("check.overwrite", false);
   const [result, setResult] = useState<CheckResult | null>(null);
   const selectedTemplate = templates.find((item) => item.name === templateName) || templates[0] || DEFAULT_TEMPLATE;
 
@@ -459,8 +453,6 @@ function CheckPage({
         <PathRow label="结果另存为" value={output} kind="save" extensions={["xlsx"]} placeholder={settings.defaultOutputDir || "留空则自动生成结果文件"} onChange={setOutput} />
         <div className="option-row">
           <Toggle checked={autoOpen} onChange={setAutoOpen} label="自动打开结果" />
-          <Toggle checked={reportOnly} onChange={setReportOnly} label="仅输出报告" />
-          <Toggle checked={overwrite} onChange={setOverwrite} label="覆盖同名结果" />
         </div>
       </div>
 
@@ -508,12 +500,36 @@ function GeneratePage({
   const [morningEnd, setMorningEnd] = useLocalState("generate.morningEnd", settings.morningEnd);
   const [afternoonStart, setAfternoonStart] = useLocalState("generate.afternoonStart", settings.afternoonStart);
   const [afternoonEnd, setAfternoonEnd] = useLocalState("generate.afternoonEnd", settings.afternoonEnd);
-  const previewRows = [
-    ["1", "Kamlesh Kumar", "Rigger", "250", "9", "14", "10"],
-    ["2", "Teshan Saminda", "Banksman", "250", "22", "28", "11"],
-    ["3", "Imran Khan", "Grinder", "240", "0", "0", "0"],
-    ["4", "Precious Nyuykonghe", "Assistant Administrator", "250", "31", "0", "0"],
-  ];
+  const [previewRows, setPreviewRows] = useState<EmployeePreviewRow[]>([]);
+  const [previewLoaded, setPreviewLoaded] = useState(false);
+
+  async function loadPreview() {
+    if (!tableC) {
+      addLog("请先选择考勤汇总表。");
+      return;
+    }
+    try {
+      const data = await backend<WorkbookPreview>("inspect_workbook", { path: tableC, max_rows: 60, max_cols: 8 });
+      const sheet = data.sheets[0];
+      const grouped = new Map<number, string[]>();
+      for (const cell of sheet?.cells || []) {
+        if (cell.row < 3) continue;
+        const values = grouped.get(cell.row) || Array.from({ length: 8 }, () => "");
+        const colIndex = cell.col.charCodeAt(0) - 65;
+        if (colIndex >= 0 && colIndex < values.length) values[colIndex] = cell.value;
+        grouped.set(cell.row, values);
+      }
+      const rows = Array.from(grouped.entries())
+        .map(([row, values]) => ({ row, values }))
+        .filter((item) => item.values.some(Boolean))
+        .slice(0, 20);
+      setPreviewRows(rows);
+      setPreviewLoaded(true);
+      addLog(`已读取预览: ${fileName(tableC)}，${rows.length} 行`);
+    } catch (error) {
+      addLog(error instanceof Error ? error.message : String(error));
+    }
+  }
 
   async function run() {
     if (!tableC || !templateB) {
@@ -562,7 +578,7 @@ function GeneratePage({
         subtitle="根据考勤汇总表批量生成员工月度考勤文件。"
         actions={
           <>
-            <button className="secondary-button"><FileSpreadsheet size={16} />读取预览</button>
+            <button className="secondary-button" onClick={loadPreview}><FileSpreadsheet size={16} />读取预览</button>
             <button className="primary-button" disabled={busy !== "idle"} onClick={run}>
               {busy === "generating" ? <Loader2 className="spin" size={18} /> : <Wand2 size={18} />}开始生成
             </button>
@@ -571,8 +587,8 @@ function GeneratePage({
       />
 
       <div className="panel">
-        <PathRow label="考勤汇总表 C" value={tableC} kind="file" extensions={["xlsx", "xlsm"]} onChange={setTableC} />
-        <PathRow label="考勤表模板 B" value={templateB} kind="file" extensions={["xlsx", "xlsm"]} onChange={setTemplateB} />
+        <PathRow label="考勤汇总表" value={tableC} kind="file" extensions={["xlsx", "xlsm"]} onChange={setTableC} />
+        <PathRow label="考勤表模板" value={templateB} kind="file" extensions={["xlsx", "xlsm"]} onChange={setTemplateB} />
         <PathRow label="输出目录" value={outputDir} kind="folder" placeholder={settings.defaultOutputDir || "选择输出目录"} onChange={setOutputDir} />
       </div>
 
@@ -587,26 +603,30 @@ function GeneratePage({
       </div>
 
       <div className="section-head">
-        <h2>待生成员工预览</h2>
-        <span>{tableC ? "读取预览后显示真实数据" : "示例数据"}</span>
+        <h2>汇总表预览</h2>
+        <span>{previewLoaded ? `${previewRows.length} 行` : "选择汇总表后点击读取预览"}</span>
       </div>
-      <div className="data-table">
-        <table>
-          <thead>
-            <tr>
-              <th>编号</th><th>员工姓名</th><th>岗位</th><th>工作小时</th><th>常规加班</th><th>周末加班</th><th>法定假加班</th><th>文件名</th>
-            </tr>
-          </thead>
-          <tbody>
-            {previewRows.map((row) => (
-              <tr key={row[0]}>
-                {row.map((cell) => <td key={cell}>{cell}</td>)}
-                <td>{row[0]}.{row[1]}-{row[2]}.xlsm</td>
+      {previewRows.length ? (
+        <div className="data-table">
+          <table>
+            <thead>
+              <tr>
+                <th>行号</th><th>A列</th><th>B列</th><th>C列</th><th>D列</th><th>E列</th><th>F列</th><th>G列</th><th>H列</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {previewRows.map((row) => (
+                <tr key={row.row}>
+                  <td>{row.row}</td>
+                  {row.values.map((cell, index) => <td key={`${row.row}-${index}`}>{cell || "空"}</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="empty-state"><FileSpreadsheet size={18} />这里不会显示示例员工，读取后只展示你的汇总表真实内容。</div>
+      )}
     </section>
   );
 }
@@ -744,7 +764,7 @@ function TemplatesPage({
 
       <div className="editable-table">
         <div className="editable-head">
-          <span>启用</span><span>字段名</span><span>主表范围</span><span>考勤表坐标/表达式</span><span>比较类型</span><span>备注</span><span>操作</span>
+          <span>启用</span><span>字段名</span><span>主表范围</span><span>考勤表坐标/表达式</span><span>比较方式</span><span>备注</span><span>操作</span>
         </div>
         {enabledRules.map((rule, index) => (
           <div className="editable-row" key={`${rule.field_name}-${index}`}>
@@ -828,85 +848,13 @@ function HistoryPage({
   );
 }
 
-function SettingsPage({
-  settings,
-  setSettings,
-  addLog,
-}: {
-  settings: AppSettings;
-  setSettings: (settings: AppSettings) => void;
-  addLog: (text: string) => void;
-}) {
-  function patch(update: Partial<AppSettings>) {
-    setSettings({ ...settings, ...update });
-  }
-  return (
-    <section className="workspace">
-      <PageHeader
-        title="设置"
-        subtitle="配置默认路径、生成参数和应用偏好。"
-        actions={
-          <>
-            <button className="secondary-button" onClick={() => setSettings(DEFAULT_SETTINGS)}><RotateCcw size={16} />重置默认</button>
-            <button className="primary-button" onClick={() => addLog("设置已保存")}><Save size={16} />保存设置</button>
-          </>
-        }
-      />
-      <div className="settings-layout">
-        <div className="settings-main">
-          <div className="settings-section">
-            <h2>默认路径</h2>
-            <PathRow label="默认工资表目录" value={settings.defaultPayrollDir} kind="folder" onChange={(value) => patch({ defaultPayrollDir: value })} />
-            <PathRow label="默认考勤表目录" value={settings.defaultAttendanceDir} kind="folder" onChange={(value) => patch({ defaultAttendanceDir: value })} />
-            <PathRow label="默认输出目录" value={settings.defaultOutputDir} kind="folder" onChange={(value) => patch({ defaultOutputDir: value })} />
-          </div>
-          <div className="settings-section">
-            <h2>生成默认参数</h2>
-            <div className="settings-strip tight">
-              <Toggle checked={settings.countHolidays} onChange={(value) => patch({ countHolidays: value })} label="统计假期" />
-              <label>签名大小<input type="number" value={settings.signatureScale} onChange={(event) => patch({ signatureScale: Number(event.target.value) })} /></label>
-              <label>常规小时<input value={settings.normalHours} onChange={(event) => patch({ normalHours: event.target.value })} /></label>
-              <label>上午上班<input value={settings.morningStart} onChange={(event) => patch({ morningStart: event.target.value })} /></label>
-              <label>上午下班<input value={settings.morningEnd} onChange={(event) => patch({ morningEnd: event.target.value })} /></label>
-              <label>下午上班<input value={settings.afternoonStart} onChange={(event) => patch({ afternoonStart: event.target.value })} /></label>
-              <label>下午下班<input value={settings.afternoonEnd} onChange={(event) => patch({ afternoonEnd: event.target.value })} /></label>
-            </div>
-          </div>
-          <div className="settings-section">
-            <h2>模板与别名</h2>
-            <div className="file-links">
-              <button><FileCog size={16} />check_templates.json</button>
-              <button><FileCog size={16} />position_aliases.json</button>
-              <button><Upload size={16} />导入</button>
-            </div>
-          </div>
-          <div className="settings-section">
-            <h2>应用</h2>
-            <div className="settings-strip tight">
-              <Toggle checked={settings.autoOpenResult} onChange={(value) => patch({ autoOpenResult: value })} label="自动打开结果" />
-              <label>日志保留<input value={settings.keepLogDays} onChange={(event) => patch({ keepLogDays: event.target.value })} /></label>
-              <label>版本<input readOnly value="0.2.0" /></label>
-            </div>
-          </div>
-        </div>
-        <div className="settings-status">
-          <h2>环境状态</h2>
-          {["Python sidecar 已打包", "签名字体 已找到", "Tauri 运行正常", "本机数据 不上传"].map((item) => (
-            <div className="status-line" key={item}><CheckCircle2 size={16} />{item}</div>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
-
 export default function App() {
   const [page, setPage] = useState<Page>("check");
   const [busy, setBusy] = useState<BusyState>("idle");
   const [templates, setTemplates] = useState<CheckTemplate[]>([DEFAULT_TEMPLATE]);
   const [log, setLog] = useState<string[]>([]);
   const [history, setHistory] = useLocalState<HistoryItem[]>("task.history", []);
-  const [settings, setSettings] = useLocalState<AppSettings>("app.settings", DEFAULT_SETTINGS);
+  const [settings] = useLocalState<AppSettings>("app.settings", DEFAULT_SETTINGS);
   const [selectedHistoryId, setSelectedHistoryId] = useState("");
   const [checkResult, setCheckResult] = useState<CheckResult | null>(null);
   const [generateResult, setGenerateResult] = useState<GenerateResult | null>(null);
@@ -935,7 +883,6 @@ export default function App() {
     { id: "generate" as Page, label: "生成考勤表", icon: Archive },
     { id: "templates" as Page, label: "核对模板", icon: LayoutTemplate },
     { id: "history" as Page, label: "历史记录", icon: History },
-    { id: "settings" as Page, label: "设置", icon: Settings },
   ];
 
   return (
@@ -945,7 +892,6 @@ export default function App() {
           <div className="brand-mark">E</div>
           <span>表格核对工具</span>
         </div>
-        <div className="search-box"><Search size={15} /><span>搜索功能、模板、记录</span></div>
         <nav>
           {nav.map((item) => {
             const Icon = item.icon;
@@ -964,7 +910,6 @@ export default function App() {
         {page === "generate" && <GeneratePage settings={settings} busy={busy} setBusy={setBusy} addLog={addLog} addHistory={addHistory} onResult={(result) => { setGenerateResult(result); setCheckResult(null); }} />}
         {page === "templates" && <TemplatesPage templates={templates} setTemplates={setTemplates} addLog={addLog} />}
         {page === "history" && <HistoryPage history={history} selectedId={selectedHistoryId} setSelectedId={setSelectedHistoryId} clearHistory={() => { setHistory([]); setSelectedHistoryId(""); }} />}
-        {page === "settings" && <SettingsPage settings={settings} setSettings={setSettings} addLog={addLog} />}
       </div>
 
       <DetailPanel page={page} busy={busy} selectedTemplate={selectedTemplate} checkResult={checkResult} generateResult={generateResult} selectedHistory={selectedHistory} log={log} />

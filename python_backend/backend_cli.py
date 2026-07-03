@@ -216,6 +216,16 @@ def action_export_template_file(payload: Dict[str, Any]) -> Dict[str, Any]:
     return ok({"path": str(path)})
 
 
+def action_config_paths(_payload: Dict[str, Any]) -> Dict[str, Any]:
+    return ok(
+        {
+            "check_templates": str(check_tool.CHECK_TEMPLATES_PATH),
+            "position_aliases": str(check_tool.POSITION_ALIASES_PATH),
+            "signature_font": str(generator.SIGNATURE_FONT_PATH),
+        }
+    )
+
+
 ACTIONS = {
     "check": action_check,
     "generate": action_generate,
@@ -226,6 +236,7 @@ ACTIONS = {
     "validate_template": action_validate_template,
     "load_template_file": action_load_template_file,
     "export_template_file": action_export_template_file,
+    "config_paths": action_config_paths,
 }
 
 

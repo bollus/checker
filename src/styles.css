@@ -147,7 +147,6 @@ code {
   font-weight: 850;
 }
 
-.search-box,
 .search-input {
   display: flex;
   align-items: center;
@@ -231,6 +230,7 @@ nav button.active {
   align-items: flex-start;
   justify-content: space-between;
   gap: 24px;
+  min-width: 0;
 }
 
 .page-header p {
@@ -247,6 +247,11 @@ nav button.active {
   min-width: 0;
 }
 
+.header-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .primary-button,
 .secondary-button,
 .icon-button,
@@ -258,12 +263,14 @@ nav button.active {
   align-items: center;
   justify-content: center;
   gap: 8px;
+  flex-shrink: 0;
   height: 40px;
   padding: 0 14px;
   color: #4c5871;
   border: 1px solid #e0e6f0;
   border-radius: 11px;
   background: #ffffff;
+  white-space: nowrap;
   transition: transform 150ms ease, box-shadow 150ms ease, background 150ms ease, color 150ms ease;
 }
 
@@ -302,7 +309,6 @@ nav button.active {
 .template-meta,
 .settings-strip,
 .settings-section,
-.settings-status,
 .history-detail,
 .data-table,
 .editable-table,
@@ -316,14 +322,14 @@ nav button.active {
 
 .panel {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px 14px;
   padding: 16px;
 }
 
 .form-row {
   display: grid;
-  grid-template-columns: 112px minmax(0, 1fr) 38px;
+  grid-template-columns: 116px minmax(0, 1fr) 38px;
   align-items: center;
   gap: 10px;
   min-width: 0;
@@ -611,9 +617,12 @@ nav button.active {
   align-items: start;
 }
 
+.settings-layout.single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .history-detail,
-.settings-section,
-.settings-status {
+.settings-section {
   display: grid;
   gap: 14px;
   padding: 16px;
@@ -650,27 +659,6 @@ nav button.active {
   gap: 10px;
 }
 
-.settings-status {
-  position: sticky;
-  top: 24px;
-}
-
-.status-line {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 38px;
-  padding: 0 10px;
-  color: #4d5870;
-  border: 1px solid #e5ebf4;
-  border-radius: 10px;
-  background: #f8faff;
-}
-
-.status-line svg {
-  color: #28a868;
-}
-
 .spin {
   animation: spin 900ms linear infinite;
 }
@@ -684,6 +672,15 @@ nav button.active {
 @media (max-width: 1260px) {
   .app-shell {
     grid-template-columns: 216px minmax(0, 1fr) 270px;
+  }
+
+  .page-header {
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .header-actions {
+    justify-content: flex-start;
   }
 
   .panel,
