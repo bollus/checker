@@ -2,8 +2,6 @@ name: Build Tauri Desktop
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTC_WRAPPER: sccache
-  SCCACHE_GHA_ENABLED: "true"
 
 on:
   workflow_dispatch:
@@ -52,9 +50,6 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Setup Rust compiler cache
-        uses: mozilla-actions/sccache-action@v0.0.6
-
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
@@ -84,10 +79,6 @@ jobs:
 
       - name: Build Windows app
         run: npm run tauri:build -- --bundles nsis
-
-      - name: Show Rust compiler cache stats
-        if: always()
-        run: sccache --show-stats
 
       - name: Set artifact version
         shell: pwsh
@@ -128,9 +119,6 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Setup Rust compiler cache
-        uses: mozilla-actions/sccache-action@v0.0.6
-
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
@@ -161,10 +149,6 @@ jobs:
 
       - name: Build macOS app
         run: npm run tauri:build -- --bundles dmg,app
-
-      - name: Show Rust compiler cache stats
-        if: always()
-        run: sccache --show-stats
 
       - name: Set artifact version
         shell: bash
