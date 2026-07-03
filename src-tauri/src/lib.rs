@@ -1,10 +1,25 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::env;
+use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tauri::Manager;
+
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+fn hide_console_window(command: &mut Command) -> &mut Command {
+    #[cfg(target_os = "windows")]
+    {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct BackendEnvelope {
@@ -30,6 +45,25 @@ fn executable_name(base: &str) -> String {
     }
 }
 
+fn find_file_recursively(root: &Path, file_name: &str, max_depth: usize) -> Option<PathBuf> {
+    if max_depth == 0 || !root.is_dir() {
+        return None;
+    }
+    let entries = fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.file_name().and_then(|name| name.to_str()) == Some(file_name) {
+            return Some(path);
+        }
+        if path.is_dir() {
+            if let Some(found) = find_file_recursively(&path, file_name, max_depth - 1) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
 fn find_python() -> String {
     if cfg!(target_os = "windows") {
         "python".to_string()
@@ -40,15 +74,33 @@ fn find_python() -> String {
 
 fn bundled_backend(app: &tauri::AppHandle) -> Option<PathBuf> {
     let name = executable_name("excel-check-backend");
+    let mut roots: Vec<PathBuf> = Vec::new();
     if let Ok(resource_dir) = app.path().resource_dir() {
+        roots.push(resource_dir);
+    }
+    if let Ok(exe_path) = env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            roots.push(exe_dir.to_path_buf());
+        }
+    }
+    if let Ok(current_dir) = env::current_dir() {
+        roots.push(current_dir);
+    }
+
+    for root in roots {
         for candidate in [
-            resource_dir.join(&name),
-            resource_dir.join("dist-sidecar").join(&name),
-            resource_dir.join("python_backend").join(&name),
+            root.join(&name),
+            root.join("dist-sidecar").join(&name),
+            root.join("python_backend").join(&name),
+            root.join("resources").join(&name),
+            root.join("resources").join("dist-sidecar").join(&name),
         ] {
             if candidate.exists() {
                 return Some(candidate);
             }
+        }
+        if let Some(found) = find_file_recursively(&root, &name, 4) {
+            return Some(found);
         }
     }
     None
@@ -100,11 +152,13 @@ async fn run_backend(app: tauri::AppHandle, action: String, payload: Value) -> R
     let backend = backend_command(&app)?;
     let request = json!({ "action": action, "payload": payload }).to_string();
 
-    let mut child = Command::new(&backend.program)
+    let mut command = Command::new(&backend.program);
+    command
         .args(&backend.args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = hide_console_window(&mut command)
         .spawn()
         .map_err(|err| format!("启动后端失败: {err}"))?;
 
@@ -136,10 +190,9 @@ async fn run_backend(app: tauri::AppHandle, action: String, payload: Value) -> R
 async fn reveal_path(path: String) -> Result<(), String> {
     let target = PathBuf::from(path);
     let command_result = if cfg!(target_os = "windows") {
-        Command::new("explorer")
-            .arg("/select,")
-            .arg(target)
-            .status()
+        let mut command = Command::new("explorer");
+        command.arg("/select,").arg(target);
+        hide_console_window(&mut command).status()
     } else if cfg!(target_os = "macos") {
         Command::new("open").arg("-R").arg(target).status()
     } else {
@@ -158,7 +211,9 @@ async fn reveal_path(path: String) -> Result<(), String> {
 async fn open_path(path: String) -> Result<(), String> {
     let target = PathBuf::from(&path);
     let command_result = if cfg!(target_os = "windows") {
-        Command::new("cmd").args(["/C", "start", "", &path]).status()
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", "", &path]);
+        hide_console_window(&mut command).status()
     } else if cfg!(target_os = "macos") {
         Command::new("open").arg(target).status()
     } else {
