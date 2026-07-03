@@ -36,7 +36,7 @@ printf '%s' '{"action":"list_templates","payload":{}}' | python3 python_backend/
 打包说明：
 
 - GitHub Actions 中的 `Build Tauri Desktop` 只会构建 Windows 和 macOS 桌面应用，不发布 Linux 包
-- Windows 产物：`.msi` 和 `setup.exe`
+- Windows 产物：`setup.exe`
 - macOS 产物：`.dmg` 和 `.app.tar.gz`
 - Actions 会先用 PyInstaller 把 `python_backend/backend_cli.py` 打包成 `excel-check-backend`
 - Tauri 会把 sidecar、字体、模板和 Python 核心逻辑作为资源打进应用
