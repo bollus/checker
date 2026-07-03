@@ -2,6 +2,48 @@
 
 用于核对主工资表和一个考勤表目录中的 Excel 文件，并把主表里不一致的单元格高亮出来。
 
+## 新版跨平台桌面端
+
+仓库已新增 `Tauri v2 + React + TypeScript + Python sidecar` 版本，用于后续替代旧 Tkinter 界面。
+
+新版目标：
+
+- Windows / macOS 均可打包成独立应用
+- 用户电脑不需要安装 Python
+- UI 使用左侧导航、主工作区、右侧结果面板的现代桌面布局
+- 支持工资表核对、考勤表生成、核对模板管理
+- 核对模板支持通过工资表/考勤表预览进行可视化点选创建规则
+
+开发运行：
+
+```bash
+npm install
+npm run tauri:dev
+```
+
+仅检查前端：
+
+```bash
+npm run build
+```
+
+Python sidecar 本地调试：
+
+```bash
+printf '%s' '{"action":"list_templates","payload":{}}' | python3 python_backend/backend_cli.py
+```
+
+打包说明：
+
+- GitHub Actions 中的 `Build Tauri Desktop` 只会构建 Windows 和 macOS 桌面应用，不发布 Linux 包
+- Windows 产物：`.msi` 和 `setup.exe`
+- macOS 产物：`.dmg` 和 `.app.tar.gz`
+- Actions 会先用 PyInstaller 把 `python_backend/backend_cli.py` 打包成 `excel-check-backend`
+- Tauri 会把 sidecar、字体、模板和 Python 核心逻辑作为资源打进应用
+- 本机手动打包需要安装 Node.js、Rust/Cargo、Python 3 和 PyInstaller；Windows/macOS 正式包建议直接使用 GitHub Actions 产物
+
+说明：旧版 `excel_check_tool.py` Tkinter GUI 仍保留，方便回退和调试；新界面通过 sidecar 调用同一套 Excel 核心逻辑。
+
 ## 已实现规则
 
 - 主表 `F7-*` 对比考勤表 `A3`

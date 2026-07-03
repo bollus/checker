@@ -1,0 +1,124 @@
+name: Build Tauri Desktop
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "src/**"
+      - "src-tauri/**"
+      - "python_backend/**"
+      - "excel_check_tool.py"
+      - "generate_table_bs.py"
+      - "backend_cli.spec"
+      - "package.json"
+      - "package-lock.json"
+      - "vite.config.ts"
+      - "tsconfig.json"
+      - "Nothing_You_Could_Do/**"
+      - ".github/workflows/build-tauri-desktop.yml"
+
+jobs:
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip pyinstaller pillow
+          npm ci
+
+      - name: Build Python sidecar
+        run: python -m PyInstaller --clean --distpath dist-sidecar backend_cli.spec
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build Windows app
+        run: npm run tauri:build -- --bundles nsis,msi
+
+      - name: Set artifact version
+        shell: pwsh
+        run: |
+          $date = Get-Date -Format "yyyyMMdd"
+          $sha = "${{ github.sha }}".Substring(0, 7)
+          "PACKAGE_VERSION=$date-$sha" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Upload Windows bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: excel-check-tool-windows-${{ env.PACKAGE_VERSION }}
+          path: |
+            src-tauri/target/release/bundle/**/*.msi
+            src-tauri/target/release/bundle/**/*.exe
+          if-no-files-found: error
+
+  build-macos:
+    name: Build macOS
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip pyinstaller pillow
+          npm ci
+
+      - name: Build Python sidecar
+        run: python -m PyInstaller --clean --distpath dist-sidecar backend_cli.spec
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build macOS app
+        run: npm run tauri:build -- --bundles dmg,app
+
+      - name: Set artifact version
+        shell: bash
+        run: |
+          echo "PACKAGE_VERSION=$(date +%Y%m%d)-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
+      - name: Upload macOS bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: excel-check-tool-macos-${{ env.PACKAGE_VERSION }}
+          path: |
+            src-tauri/target/release/bundle/**/*.dmg
+            src-tauri/target/release/bundle/**/*.app.tar.gz
+          if-no-files-found: error
