@@ -238,13 +238,27 @@ def infer_data_end_row(sheet: SheetXml, start_row: int) -> int:
         anchor_value = sheet.get_value(f"A{current}")
         if anchor_value in (None, ""):
             break
-        try:
-            normalize_number(anchor_value)
-        except Exception:
+        anchor_text = to_display(anchor_value)
+        if "修正上月加班" in anchor_text or "FIX OT" in anchor_text.upper():
+            last_seen = current
+            break
+        if not is_data_anchor(anchor_text):
             break
         last_seen = current
         current += 1
     return last_seen
+
+
+def is_data_anchor(value: str) -> bool:
+    text = value.strip()
+    if not text:
+        return False
+    try:
+        normalize_number(text)
+        return True
+    except Exception:
+        pass
+    return bool(re.fullmatch(r"\d{1,2}[-/\s.][A-Za-z]{3,9}", text))
 
 
 def expand_n_row(row_text: str, sheet: SheetXml, start_row: int) -> int:
