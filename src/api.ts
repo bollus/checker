@@ -47,6 +47,7 @@ export interface GenerateResult {
   report_path: string;
   generated_count: number;
   generated_files: string[];
+  warnings?: string[];
   progress?: ProgressSnapshot;
 }
 
@@ -77,6 +78,22 @@ export interface WorkbookPreview {
 
 export async function backend<T>(action: string, payload: unknown): Promise<T> {
   const result = await invoke<BackendEnvelope<T>>("run_backend", { action, payload });
+  if (!result.ok) {
+    throw new Error(result.errors.join("\n") || "任务失败");
+  }
+  return result.data as T;
+}
+
+export async function checkRust<T>(payload: unknown): Promise<T> {
+  const result = await invoke<BackendEnvelope<T>>("run_check_rust", { payload });
+  if (!result.ok) {
+    throw new Error(result.errors.join("\n") || "任务失败");
+  }
+  return result.data as T;
+}
+
+export async function generateRust<T>(payload: unknown): Promise<T> {
+  const result = await invoke<BackendEnvelope<T>>("run_generate_rust", { payload });
   if (!result.ok) {
     throw new Error(result.errors.join("\n") || "任务失败");
   }

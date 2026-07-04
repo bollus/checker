@@ -35,14 +35,15 @@
       "icons/icon.ico",
       "icons/icon.icns"
     ],
-    "resources": [
-      "../python_backend",
-      "../excel_check_tool.py",
-      "../generate_table_bs.py",
-      "../dist-sidecar",
-      "../check_templates.json",
-      "../position_aliases.json",
-      "../Nothing_You_Could_Do"
-    ]
+    "resources": {
+      "../python_backend": "python_backend",
+      "../excel_check_tool.py": "excel_check_tool.py",
+      "../generate_table_bs.py": "generate_table_bs.py",
+      "../dist-sidecar": "dist-sidecar",
+      "../check_templates.json": "check_templates.json",
+      "../position_aliases.json": "position_aliases.json",
+      "../position_rules.json": "position_rules.json",
+      "../Nothing_You_Could_Do": "Nothing_You_Could_Do"
+    }
   }
 }

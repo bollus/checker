@@ -1,0 +1,22 @@
+{
+  "token_aliases": {
+    "qci": ["qc", "inspector"],
+    "qcl": ["qc", "inspector"],
+    "mec": ["mechanical"],
+    "admin": ["administrator"],
+    "construcion": ["construction"],
+    "controler": ["controller"],
+    "keepr": ["keeper"],
+    "scaffolder": ["scaffolding"]
+  },
+  "optional_tokens": [
+    "construction",
+    "mechanical",
+    "civil",
+    "ei",
+    "piping",
+    "inspector",
+    "supervisor",
+    "officer"
+  ]
+}

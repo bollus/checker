@@ -28,11 +28,13 @@ import {
 import { useEffect, useState } from "react";
 import {
   backend,
+  checkRust,
   CheckResult,
   CheckRule,
   CheckTemplate,
   CompareType,
   GenerateResult,
+  generateRust,
   Mismatch,
   openPath,
   readTextFile,
@@ -528,6 +530,7 @@ function CheckPage({
   const [output, setOutput] = useLocalState("check.output", "");
   const [templateName, setTemplateName] = useLocalState("check.template", "默认模板");
   const [autoOpen, setAutoOpen] = useLocalState("check.autoOpen", settings.autoOpenResult);
+  const [checkEngine, setCheckEngine] = useLocalState("check.engine", "python");
   const [result, setResult] = useState<CheckResult | null>(null);
   const [notice, setNotice] = useState<{ tone: "warning" | "error"; title: string; lines: string[] } | null>(null);
   const selectedTemplate = templates.find((item) => item.name === templateName) || templates[0] || DEFAULT_TEMPLATE;
@@ -541,12 +544,15 @@ function CheckPage({
     setNotice(null);
     try {
       addLog(`开始核对: ${fileName(tableA)}`);
-      const data = await backend<CheckResult>("check", {
+      const payload = {
         table_a_path: tableA,
         table_bs_folder: tableBs,
         output_path: output || null,
         template: selectedTemplate,
-      });
+      };
+      const data = checkEngine === "rust"
+        ? await checkRust<CheckResult>(payload)
+        : await backend<CheckResult>("check", payload);
       setResult(data);
       onResult(data);
       addLog(`核对完成: ${data.mismatch_count} 个不一致`);
@@ -600,6 +606,18 @@ function CheckPage({
           />
           <LayoutTemplate size={17} />
         </div>
+        <div className="form-row">
+          <label>核对引擎</label>
+          <CustomSelect
+            value={checkEngine}
+            options={[
+              { value: "python", label: "Python 稳定版" },
+              { value: "rust", label: "Rust 实验版" },
+            ]}
+            onChange={setCheckEngine}
+          />
+          <FileCheck2 size={17} />
+        </div>
         <PathRow label="结果另存为" value={output} kind="save" extensions={["xlsx"]} placeholder={settings.defaultOutputDir || "留空则自动生成结果文件"} onChange={setOutput} />
         <div className="option-row">
           <Toggle checked={autoOpen} onChange={setAutoOpen} label="自动打开结果" />
@@ -650,6 +668,7 @@ function GeneratePage({
   const [morningEnd, setMorningEnd] = useLocalState("generate.morningEnd", settings.morningEnd);
   const [afternoonStart, setAfternoonStart] = useLocalState("generate.afternoonStart", settings.afternoonStart);
   const [afternoonEnd, setAfternoonEnd] = useLocalState("generate.afternoonEnd", settings.afternoonEnd);
+  const [generateEngine, setGenerateEngine] = useLocalState("generate.engine", "python");
   const [previewRows, setPreviewRows] = useState<EmployeePreviewRow[]>([]);
   const [previewLoaded, setPreviewLoaded] = useState(false);
 
@@ -689,7 +708,7 @@ function GeneratePage({
     setBusy("generating");
     try {
       addLog(`开始生成: ${fileName(tableC)}`);
-      const data = await backend<GenerateResult>("generate", {
+      const payload = {
         table_c_path: tableC,
         template_b_path: templateB,
         output_dir: outputDir || null,
@@ -700,9 +719,15 @@ function GeneratePage({
         afternoon_start: afternoonStart,
         afternoon_end: afternoonEnd,
         normal_hours: normalHours,
-      });
+      };
+      const data = generateEngine === "rust"
+        ? await generateRust<GenerateResult>(payload)
+        : await backend<GenerateResult>("generate", payload);
       onResult(data);
       addLog(`生成完成: ${data.generated_count} 份`);
+      if ((data as GenerateResult & { warnings?: string[] }).warnings?.length) {
+        addLog(`生成提示: ${(data as GenerateResult & { warnings: string[] }).warnings.join("；")}`);
+      }
     } catch (error) {
       addLog(error instanceof Error ? error.message : String(error));
     } finally {
@@ -728,6 +753,18 @@ function GeneratePage({
       <div className="panel">
         <PathRow label="汇总表" value={tableC} kind="file" extensions={["xlsx", "xlsm"]} onChange={setTableC} />
         <PathRow label="考勤表模板" value={templateB} kind="file" extensions={["xlsx", "xlsm"]} onChange={setTemplateB} />
+        <div className="form-row">
+          <label>生成引擎</label>
+          <CustomSelect
+            value={generateEngine}
+            options={[
+              { value: "python", label: "Python 稳定版" },
+              { value: "rust", label: "Rust 实验版" },
+            ]}
+            onChange={setGenerateEngine}
+          />
+          <Wand2 size={17} />
+        </div>
         <PathRow label="输出目录" value={outputDir} kind="folder" placeholder={settings.defaultOutputDir || "选择输出目录"} onChange={setOutputDir} />
       </div>
 

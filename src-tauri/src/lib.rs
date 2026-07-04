@@ -9,6 +9,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use tauri::Manager;
 
+pub mod rust_check;
+pub mod rust_generate;
+
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
@@ -66,7 +69,7 @@ fn find_file_recursively(root: &Path, file_name: &str, max_depth: usize) -> Opti
     let entries = fs::read_dir(root).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.file_name().and_then(|name| name.to_str()) == Some(file_name) {
+        if path.is_file() && path.file_name().and_then(|name| name.to_str()) == Some(file_name) {
             return Some(path);
         }
         if path.is_dir() {
@@ -109,7 +112,7 @@ fn bundled_backend(app: &tauri::AppHandle) -> Option<PathBuf> {
             root.join("resources").join(&name),
             root.join("resources").join("dist-sidecar").join(&name),
         ] {
-            if candidate.exists() {
+            if candidate.is_file() {
                 return Some(candidate);
             }
         }
@@ -133,10 +136,41 @@ fn dev_backend_script() -> Option<PathBuf> {
     None
 }
 
+fn find_resource_file(app: &tauri::AppHandle, file_name: &str) -> Option<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        roots.push(resource_dir);
+    }
+    if let Ok(exe_path) = env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            roots.push(exe_dir.to_path_buf());
+        }
+    }
+    if let Ok(current_dir) = env::current_dir() {
+        roots.push(current_dir);
+    }
+    for root in roots {
+        for candidate in [
+            root.join(file_name),
+            root.join("resources").join(file_name),
+            root.join("python_backend").join(file_name),
+        ] {
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        if let Some(found) = find_file_recursively(&root, file_name, 4) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+
 fn backend_command(app: &tauri::AppHandle) -> Result<BackendCommand, String> {
     if let Ok(path) = env::var("EXCEL_CHECK_BACKEND") {
         let candidate = PathBuf::from(path);
-        if candidate.exists() {
+        if candidate.is_file() {
             return Ok(BackendCommand {
                 program: candidate,
                 args: vec![],
@@ -294,13 +328,88 @@ async fn read_text_file(path: String) -> Result<String, String> {
     fs::read_to_string(&path).map_err(|err| format!("读取文件失败: {err}\n路径: {path}"))
 }
 
+#[tauri::command]
+async fn run_check_rust(app: tauri::AppHandle, mut payload: Value) -> Result<BackendEnvelope, String> {
+    if payload.get("position_aliases_path").is_none() {
+        if let Some(path) = find_resource_file(&app, "position_aliases.json") {
+            if let Some(object) = payload.as_object_mut() {
+                object.insert(
+                    "position_aliases_path".to_string(),
+                    Value::String(path.to_string_lossy().to_string()),
+                );
+            }
+        }
+    }
+    if payload.get("position_rules_path").is_none() {
+        if let Some(path) = find_resource_file(&app, "position_rules.json") {
+            if let Some(object) = payload.as_object_mut() {
+                object.insert(
+                    "position_rules_path".to_string(),
+                    Value::String(path.to_string_lossy().to_string()),
+                );
+            }
+        }
+    }
+    let payload: rust_check::CheckPayload = serde_json::from_value(payload)
+        .map_err(|err| format!("Rust 核对参数无效: {err}"))?;
+    match rust_check::run_check(payload) {
+        Ok(data) => Ok(BackendEnvelope {
+            ok: true,
+            data: Some(serde_json::to_value(data).map_err(|err| format!("Rust 核对结果序列化失败: {err}"))?),
+            warnings: vec![],
+            errors: vec![],
+            traceback: None,
+        }),
+        Err(error) => Ok(BackendEnvelope {
+            ok: false,
+            data: None,
+            warnings: vec![],
+            errors: vec![error],
+            traceback: None,
+        }),
+    }
+}
+
+#[tauri::command]
+async fn run_generate_rust(app: tauri::AppHandle, payload: Value) -> Result<BackendEnvelope, String> {
+    let mut payload = payload;
+    if payload.get("signature_font_path").is_none() {
+        if let Some(path) = find_resource_file(&app, "NothingYouCouldDo-Regular.ttf") {
+            if let Some(object) = payload.as_object_mut() {
+                object.insert(
+                    "signature_font_path".to_string(),
+                    Value::String(path.to_string_lossy().to_string()),
+                );
+            }
+        }
+    }
+    let payload: rust_generate::GeneratePayload = serde_json::from_value(payload)
+        .map_err(|err| format!("Rust 生成参数无效: {err}"))?;
+    match rust_generate::run_generate(payload) {
+        Ok(data) => Ok(BackendEnvelope {
+            ok: true,
+            data: Some(serde_json::to_value(data).map_err(|err| format!("Rust 生成结果序列化失败: {err}"))?),
+            warnings: vec![],
+            errors: vec![],
+            traceback: None,
+        }),
+        Err(error) => Ok(BackendEnvelope {
+            ok: false,
+            data: None,
+            warnings: vec![],
+            errors: vec![error],
+            traceback: None,
+        }),
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(BackendState {
             process: Mutex::new(None),
         })
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![run_backend, reveal_path, open_path, read_text_file])
+        .invoke_handler(tauri::generate_handler![run_backend, run_check_rust, run_generate_rust, reveal_path, open_path, read_text_file])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

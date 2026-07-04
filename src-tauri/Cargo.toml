@@ -17,3 +17,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
+quick-xml = "0.38"
+png = "0.18"
+rusttype = "0.9"
+zip = { version = "2", default-features = false, features = ["deflate"] }
