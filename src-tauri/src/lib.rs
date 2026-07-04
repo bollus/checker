@@ -155,6 +155,8 @@ async fn run_backend(app: tauri::AppHandle, action: String, payload: Value) -> R
     let mut command = Command::new(&backend.program);
     command
         .args(&backend.args)
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONIOENCODING", "utf-8")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

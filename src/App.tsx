@@ -725,7 +725,7 @@ function GeneratePage({
     <section className="workspace">
       <PageHeader
         title="生成考勤表"
-        subtitle="根据考勤汇总表批量生成员工月度考勤文件。"
+        subtitle="根据工资/考勤汇总表批量生成员工月度考勤文件。"
         actions={
           <>
             <button className="secondary-button" onClick={loadPreview}><FileSpreadsheet size={16} />读取预览</button>
@@ -737,7 +737,7 @@ function GeneratePage({
       />
 
       <div className="panel">
-        <PathRow label="考勤汇总表" value={tableC} kind="file" extensions={["xlsx", "xlsm"]} onChange={setTableC} />
+        <PathRow label="汇总表" value={tableC} kind="file" extensions={["xlsx", "xlsm"]} onChange={setTableC} />
         <PathRow label="考勤表模板" value={templateB} kind="file" extensions={["xlsx", "xlsm"]} onChange={setTemplateB} />
         <PathRow label="输出目录" value={outputDir} kind="folder" placeholder={settings.defaultOutputDir || "选择输出目录"} onChange={setOutputDir} />
       </div>

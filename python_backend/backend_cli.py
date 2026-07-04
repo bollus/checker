@@ -23,7 +23,7 @@ def json_default(value: Any) -> Any:
 
 
 def read_request() -> Dict[str, Any]:
-    raw = sys.stdin.read()
+    raw = sys.stdin.buffer.read().decode("utf-8")
     if not raw.strip():
         raise check_tool.WorkbookError("没有收到任务参数")
     try:
@@ -397,7 +397,7 @@ def main() -> int:
         response = ACTIONS[action](payload)
     except BaseException as exc:
         response = fail(exc)
-    sys.stdout.write(json.dumps(response, ensure_ascii=False, default=json_default))
+    sys.stdout.buffer.write(json.dumps(response, ensure_ascii=False, default=json_default).encode("utf-8"))
     return 0 if response.get("ok") else 1
 
 

@@ -467,7 +467,7 @@ def group_day_types(summary_sheet: SheetXml, styles_root: ET.Element) -> List[Tu
         style_by_signature[signature] = style_id
 
     if not grouped:
-        raise WorkbookError("表C 未找到日期头(J2开始)")
+        raise WorkbookError("汇总表未找到日期头(J2开始)")
 
     work_signature = max(grouped.items(), key=lambda item: len(item[1]))[0]
     other_signatures = [signature for signature in grouped if signature != work_signature]
@@ -509,7 +509,7 @@ def parse_summary_value(raw_value: Optional[str]) -> Tuple[str, Optional[Decimal
     try:
         return "hours", Decimal(text)
     except Exception as exc:  # pragma: no cover - defensive
-        raise WorkbookError(f"无法解析表C考勤值: {raw_value!r}") from exc
+        raise WorkbookError(f"无法解析汇总表考勤值: {raw_value!r}") from exc
 
 
 def parse_optional_decimal(raw_value: Optional[str]) -> Decimal:
@@ -588,6 +588,90 @@ def read_summary(summary_path: Path) -> Tuple[SpreadsheetZip, WorkbookSheet, Lis
         row_num += 1
 
     return book, summary_sheet_info, day_headers, employees
+
+
+def template_month_headers(template_path: Path) -> List[Tuple[str, int, str]]:
+    book = SpreadsheetZip(template_path)
+    main_sheet = workbook_sheets(book)[0].sheet
+    month_serial = main_sheet.get_value("M3")
+    if month_serial in (None, ""):
+        raise WorkbookError("模板表B缺少 M3 月份信息")
+    month_start = excel_serial_to_date(month_serial)
+    month_days = (date(month_start.year + (month_start.month // 12), ((month_start.month % 12) + 1), 1) - timedelta(days=1)).day
+    rest_weekday = (main_sheet.get_value("N7") or "Friday").strip()
+    headers: List[Tuple[str, int, str]] = []
+    for day_number in range(1, month_days + 1):
+        current_date = date(month_start.year, month_start.month, day_number)
+        day_type = "rest" if weekday_name(current_date).casefold() == rest_weekday.casefold() else "work"
+        headers.append((num_to_col(col_to_num("J") + day_number - 1), day_number, day_type))
+    return headers
+
+
+def distribute_normal_hours(
+    total_hours: Decimal,
+    day_headers: List[Tuple[str, int, str]],
+    schedule: WorkSchedule,
+) -> Tuple[Dict[int, Tuple[str, Optional[Decimal]]], Decimal]:
+    days: Dict[int, Tuple[str, Optional[Decimal]]] = {}
+    remaining = total_hours
+    for _, day_number, day_type in day_headers:
+        if day_type != "work" or remaining <= 0:
+            days[day_number] = ("blank", None)
+            continue
+        value = min(schedule.normal_hours, remaining)
+        days[day_number] = ("hours", value)
+        remaining -= value
+    return days, max(remaining, Decimal("0"))
+
+
+def read_payroll_summary(
+    payroll_path: Path,
+    template_path: Path,
+    schedule: WorkSchedule,
+) -> Tuple[SpreadsheetZip, WorkbookSheet, List[Tuple[str, int, str]], List[SummaryEmployee]]:
+    book = SpreadsheetZip(payroll_path)
+    sheets = workbook_sheets(book)
+    sheet_info = sheets[0]
+    sheet = sheet_info.sheet
+    day_headers = template_month_headers(template_path)
+    employees: List[SummaryEmployee] = []
+    row_num = 3
+    while True:
+        no_raw = sheet.get_value(f"A{row_num}")
+        name = (sheet.get_value(f"E{row_num}") or "").strip()
+        position = (sheet.get_value(f"F{row_num}") or "").strip()
+        if no_raw in (None, "") and not name and not position:
+            break
+        try:
+            no_value = int(Decimal(str(no_raw)))
+        except Exception:
+            row_num += 1
+            continue
+        normal_hours = parse_optional_decimal(sheet.get_value(f"G{row_num}"))
+        days, overflow_hours = distribute_normal_hours(normal_hours, day_headers, schedule)
+        employees.append(
+            SummaryEmployee(
+                row_num=row_num,
+                no=no_value,
+                employee_no="",
+                name=name,
+                project=(sheet.get_value(f"C{row_num}") or "").strip(),
+                company=(sheet.get_value(f"B{row_num}") or "").strip(),
+                passport=(sheet.get_value(f"D{row_num}") or "").strip(),
+                crew_group="",
+                position=position,
+                joining_date=None,
+                days=days,
+                correction_nwh=overflow_hours,
+                correction_normal_ot=parse_optional_decimal(sheet.get_value(f"K{row_num}")),
+                correction_weekend_ot=parse_optional_decimal(sheet.get_value(f"L{row_num}")),
+                correction_holiday_ot=parse_optional_decimal(sheet.get_value(f"M{row_num}")),
+            )
+        )
+        row_num += 1
+    if not employees:
+        raise WorkbookError("工资汇总表未读取到员工数据，请确认 A/E/F/G/K/L/M 列结构")
+    return book, sheet_info, day_headers, employees
 
 
 def build_output_name(employee: SummaryEmployee, suffix: str) -> str:
@@ -1163,7 +1247,12 @@ def run_generate(
 ) -> Tuple[Path, List[Path], Path]:
     signature_scale = validate_signature_scale(signature_scale)
     schedule = build_work_schedule(morning_start, morning_end, afternoon_start, afternoon_end, normal_hours)
-    _, _, day_headers, employees = read_summary(table_c_path)
+    try:
+        _, _, day_headers, employees = read_summary(table_c_path)
+    except WorkbookError as exc:
+        if "未找到日期头" not in str(exc):
+            raise
+        _, _, day_headers, employees = read_payroll_summary(table_c_path, template_b_path, schedule)
     output = output_dir or next_output_dir(table_c_path)
     generated_files: List[Path] = []
     for employee in employees:
