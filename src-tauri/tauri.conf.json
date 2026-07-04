@@ -36,6 +36,10 @@
       "icons/icon.ico",
       "icons/icon.icns"
     ],
+    "macOS": {
+      "signingIdentity": "-",
+      "hardenedRuntime": false
+    },
     "resources": {
       "../check_templates.json": "check_templates.json",
       "../position_aliases.json": "position_aliases.json",

@@ -42,6 +42,17 @@ npm run tauri:build -- --bundles nsis
 
 GitHub Actions 中的 `Build Tauri Desktop` 会构建 Windows 和 macOS 包。打包资源只包含模板、岗位规则和签名字体，不包含 Python。
 
+## macOS 打开提示“已损坏”
+
+GitHub Actions 产物不是 Apple Developer ID 签名并公证的正式发行包，macOS Gatekeeper 可能会提示“已损坏，无法打开”。当前工程会对 macOS 包做 ad-hoc 签名，但未公证的包首次打开仍可能需要手动移除隔离标记：
+
+```bash
+xattr -cr /Applications/ExcelCheckTool.app
+open /Applications/ExcelCheckTool.app
+```
+
+如果是从 `.dmg` 里直接拖出来，也可以对拖出的 `.app` 执行同样命令。对外稳定分发需要配置 Apple Developer ID 证书并走 notarization。
+
 ## 功能
 
 - 工资表核对：按模板规则对比主工资表和考勤表目录，输出高亮结果和报告。
