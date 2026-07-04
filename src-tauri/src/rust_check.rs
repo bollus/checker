@@ -1143,10 +1143,14 @@ fn split_cell_ref(ref_name: &str) -> Result<(String, u32), String> {
 
 fn split_range_end(ref_name: &str) -> Result<(String, String), String> {
     let text = ref_name.trim().to_ascii_uppercase();
-    let split_at = text
-        .find(|ch: char| ch.is_ascii_digit() || ch == 'N')
-        .ok_or_else(|| format!("范围终点格式不正确: {ref_name}"))?;
-    let (col, row_text) = text.split_at(split_at);
+    let (col, row_text) = if text.ends_with('N') {
+        text.split_at(text.len() - 1)
+    } else {
+        let split_at = text
+            .find(|ch: char| ch.is_ascii_digit())
+            .ok_or_else(|| format!("范围终点格式不正确: {ref_name}"))?;
+        text.split_at(split_at)
+    };
     if col.is_empty()
         || row_text.is_empty()
         || !col.chars().all(|ch| ch.is_ascii_uppercase())
@@ -1492,6 +1496,13 @@ mod tests {
         assert!(validate_table_b_expression("SUM(G10:HN,I10:IN)").is_ok());
         assert!(validate_table_b_expression("SUM(H10:GN)").is_err());
         assert!(validate_table_b_expression("SUM(G20:G10)").is_err());
+    }
+
+    #[test]
+    fn main_range_accepts_column_n_dynamic_end() {
+        assert_eq!(parse_main_range("N7-Nn").unwrap(), ("N".to_string(), 7));
+        assert_eq!(split_range_end("Nn").unwrap(), ("N".to_string(), "N".to_string()));
+        assert_eq!(split_range_end("AN").unwrap(), ("A".to_string(), "N".to_string()));
     }
 
     #[test]
