@@ -117,6 +117,73 @@ const compareLabels: Record<CompareType, string> = {
 
 const compareOptions: CompareType[] = ["text", "number", "position"];
 
+function repairMojibake(value: string) {
+  if (!/[�ÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞßàáâãäåæçèéêëìíîï]/.test(value)) {
+    return value;
+  }
+  try {
+    const bytes = new Uint8Array(Array.from(value, (char) => char.charCodeAt(0) & 0xff));
+    const repaired = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    const badBefore = (value.match(/�/g) || []).length;
+    const badAfter = (repaired.match(/�/g) || []).length;
+    if (repaired && badAfter <= badBefore && /[\u4e00-\u9fff]/.test(repaired)) {
+      return repaired;
+    }
+  } catch {
+    return value;
+  }
+  return value;
+}
+
+function isGarbledText(value: string) {
+  return /�|Ã|Ä|Å|Æ|Ç|È|É|Ê|Ë|Ì|Í|Î|Ï|Ð|Ñ|Ò|Ó|Ô|Õ|Ö|Ø|Ù|Ú|Û|Ü/.test(value);
+}
+
+function knownDefaultFieldName(rule: CheckRule) {
+  const key = `${rule.main_range.toUpperCase()}|${rule.table_b_cell.toUpperCase()}`;
+  const labels: Record<string, string> = {
+    "F7-FN|A3": "姓名",
+    "J7-JN|C3": "岗位",
+    "N7-NN|B6": "应支付天数",
+    "W7-WN|H9": "正常工作日加班",
+    "X7-XN|I9": "周末加班",
+    "Y7-YN|J9": "法定假日加班",
+  };
+  return labels[key];
+}
+
+function normalizeTemplate(template: CheckTemplate) {
+  const defaultKeys = new Set(DEFAULT_TEMPLATE.rules.map((rule) => `${rule.main_range.toUpperCase()}|${rule.table_b_cell.toUpperCase()}`));
+  const templateKeys = new Set(template.rules.map((rule) => `${rule.main_range.toUpperCase()}|${rule.table_b_cell.toUpperCase()}`));
+  const isDefaultShape = DEFAULT_TEMPLATE.rules.length === template.rules.length && Array.from(defaultKeys).every((key) => templateKeys.has(key));
+  if (isDefaultShape) {
+    return {
+      ...template,
+      name: "默认模板",
+      rules: template.rules.map((rule) => ({
+        ...rule,
+        field_name: knownDefaultFieldName(rule) || repairMojibake(rule.field_name),
+      })),
+    };
+  }
+
+  const rules = template.rules.map((rule) => ({
+    ...rule,
+    field_name: isGarbledText(rule.field_name) ? knownDefaultFieldName(rule) || repairMojibake(rule.field_name) : repairMojibake(rule.field_name),
+  }));
+  const repairedName = repairMojibake(template.name);
+  const looksLikeBrokenDefault = isGarbledText(template.name) && rules.some((rule) => rule.main_range.toUpperCase() === "F7-FN" && rule.table_b_cell.toUpperCase() === "A3");
+  return {
+    ...template,
+    name: looksLikeBrokenDefault ? "默认模板" : repairedName,
+    rules,
+  };
+}
+
+function normalizeTemplates(templates: CheckTemplate[]) {
+  return templates.map(normalizeTemplate);
+}
+
 function fileName(path: string) {
   return path.split(/[\\/]/).filter(Boolean).pop() || path || "未选择";
 }
@@ -784,10 +851,11 @@ function TemplatesPage({
     if (!path) return;
     try {
       const data = await backend<{ templates: CheckTemplate[] }>("load_template_file", { path });
-      const merged = templates.filter((item) => !data.templates.some((incoming) => incoming.name === item.name));
-      setTemplates([...merged, ...data.templates]);
-      setCurrent(data.templates[0]);
-      addLog(`已导入模板: ${data.templates.map((item) => item.name).join(", ")}`);
+      const incomingTemplates = normalizeTemplates(data.templates);
+      const merged = templates.filter((item) => !incomingTemplates.some((incoming) => incoming.name === item.name));
+      setTemplates([...merged, ...incomingTemplates]);
+      setCurrent(incomingTemplates[0]);
+      addLog(`已导入模板: ${incomingTemplates.map((item) => item.name).join(", ")}`);
     } catch (error) {
       addLog(error instanceof Error ? error.message : String(error));
     }
@@ -945,7 +1013,7 @@ export default function App() {
 
   useEffect(() => {
     backend<{ templates: CheckTemplate[] }>("list_templates", {})
-      .then((data) => setTemplates(data.templates.length ? data.templates : [DEFAULT_TEMPLATE]))
+      .then((data) => setTemplates(data.templates.length ? normalizeTemplates(data.templates) : [DEFAULT_TEMPLATE]))
       .catch((error) => addLog(error instanceof Error ? error.message : String(error)));
   }, []);
 
