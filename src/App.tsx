@@ -917,7 +917,7 @@ function TemplatesPage({
 
       <div className="editable-table">
         <div className="editable-head">
-          <span>启用</span><span>字段名</span><span>主表范围</span><span>考勤表坐标/表达式</span><span>比较方式</span><span>备注</span><span>操作</span>
+          <span>启用</span><span>字段名</span><span>主表范围</span><span>考勤表坐标/表达式</span><span>比较方式</span><span>操作</span>
         </div>
         {enabledRules.map((rule, index) => (
           <div className="editable-row" key={`${rule.field_name}-${index}`}>
@@ -930,7 +930,6 @@ function TemplatesPage({
               options={compareOptions.map((option) => ({ value: option, label: compareLabels[option] }))}
               onChange={(value) => updateRule(index, { compare_type: value as CompareType })}
             />
-            <input placeholder="可选" />
             <div className="row-actions">
               <button onClick={() => setCurrent({ ...current, rules: [...current.rules, { ...rule, field_name: `${rule.field_name} 副本` }] })}><Copy size={14} /></button>
               <button onClick={() => setCurrent({ ...current, rules: current.rules.filter((_, itemIndex) => itemIndex !== index) })}><Trash2 size={14} /></button>

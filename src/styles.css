@@ -536,6 +536,10 @@ nav button.active {
   overflow: hidden;
 }
 
+.editable-table {
+  overflow-x: auto;
+}
+
 .data-table table {
   width: 100%;
   border-collapse: collapse;
@@ -686,10 +690,11 @@ nav button.active {
 .editable-head,
 .editable-row {
   display: grid;
-  grid-template-columns: 54px minmax(120px, 1.1fr) minmax(120px, 1fr) minmax(180px, 1.35fr) 110px minmax(120px, 0.9fr) 88px;
-  gap: 10px;
+  grid-template-columns: 48px minmax(96px, 1fr) minmax(92px, 0.82fr) minmax(132px, 1.28fr) minmax(116px, 0.95fr) 72px;
+  gap: 8px;
   align-items: center;
   padding: 10px 12px;
+  min-width: 0;
 }
 
 .editable-head {
@@ -716,6 +721,15 @@ nav button.active {
 .editable-row select,
 .editable-row .custom-select {
   width: 100%;
+}
+
+.editable-row .row-actions {
+  gap: 6px;
+}
+
+.editable-row .row-actions button {
+  width: 32px;
+  height: 34px;
 }
 
 .filters-row {
