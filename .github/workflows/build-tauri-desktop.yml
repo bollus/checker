@@ -80,6 +80,12 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      - name: Remove stale helper binaries
+        shell: pwsh
+        run: |
+          Remove-Item -Force -ErrorAction SilentlyContinue src-tauri/target/release/rust_check_cli.exe
+          Remove-Item -Force -ErrorAction SilentlyContinue src-tauri/target/release/rust_generate_cli.exe
+
       - name: Build Windows app
         run: npm run tauri:build -- --bundles nsis
 
@@ -151,6 +157,10 @@ jobs:
 
       - name: Build frontend
         run: npm run build
+
+      - name: Remove stale helper binaries
+        run: |
+          rm -f src-tauri/target/release/rust_check_cli src-tauri/target/release/rust_generate_cli
 
       - name: Build macOS app
         run: npm run tauri:build -- --bundles dmg,app
