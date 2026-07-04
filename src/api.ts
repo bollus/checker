@@ -82,3 +82,7 @@ export function openPath(path: string): Promise<void> {
 export function revealPath(path: string): Promise<void> {
   return invoke("reveal_path", { path });
 }
+
+export function readTextFile(path: string): Promise<string> {
+  return invoke("read_text_file", { path });
+}

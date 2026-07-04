@@ -223,10 +223,15 @@ async fn open_path(path: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn read_text_file(path: String) -> Result<String, String> {
+    fs::read_to_string(&path).map_err(|err| format!("读取文件失败: {err}\n路径: {path}"))
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![run_backend, reveal_path, open_path])
+        .invoke_handler(tauri::generate_handler![run_backend, reveal_path, open_path, read_text_file])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

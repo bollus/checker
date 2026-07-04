@@ -199,7 +199,13 @@ def action_validate_template(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def action_load_template_file(payload: Dict[str, Any]) -> Dict[str, Any]:
-    data = json.loads(Path(payload["path"]).read_text(encoding="utf-8"))
+    if "content" in payload:
+        data = json.loads(str(payload["content"]))
+    else:
+        path = Path(payload["path"])
+        if not path.exists():
+            raise check_tool.WorkbookError(f"未找到模板文件: {path}")
+        data = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(data, list):
         templates = [check_tool.template_to_dict(check_tool.check_template_from_dict(item)) for item in data if isinstance(item, dict)]
     elif isinstance(data, dict):

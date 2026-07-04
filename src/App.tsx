@@ -37,6 +37,7 @@ import {
   GenerateResult,
   Mismatch,
   openPath,
+  readTextFile,
   revealPath,
   WorkbookPreview,
 } from "./api";
@@ -850,7 +851,8 @@ function TemplatesPage({
     const path = await choosePath("file", ["json"]);
     if (!path) return;
     try {
-      const data = await backend<{ templates: CheckTemplate[] }>("load_template_file", { path });
+      const content = await readTextFile(path);
+      const data = await backend<{ templates: CheckTemplate[] }>("load_template_file", { path, content });
       const incomingTemplates = normalizeTemplates(data.templates);
       const merged = templates.filter((item) => !incomingTemplates.some((incoming) => incoming.name === item.name));
       setTemplates([...merged, ...incomingTemplates]);
