@@ -1904,8 +1904,9 @@ mod tests {
     #[test]
     fn rust_generate_real_files_when_available() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
-        let summary = root.join("6月岗位外包工资表-26.7.3.xlsx");
-        let template = root.join("考勤表模板.xlsm");
+        let fixture_dir = root.join("fixtures").join("manual");
+        let summary = fixture_dir.join("6月岗位外包工资表-26.7.3.xlsx");
+        let template = fixture_dir.join("考勤表模板.xlsm");
         if !(summary.exists() && template.exists()) {
             return;
         }

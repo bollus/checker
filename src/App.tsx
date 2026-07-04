@@ -27,18 +27,24 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
-  backend,
   checkRust,
   CheckResult,
   CheckRule,
   CheckTemplate,
   CompareType,
+  deleteTemplateRust,
+  exportTemplateFileRust,
   GenerateResult,
   generateRust,
+  inspectWorkbookRust,
+  listTemplatesRust,
+  loadTemplateFileRust,
   Mismatch,
   openPath,
   readTextFile,
   revealPath,
+  saveTemplateRust,
+  validateTemplateRust,
   WorkbookPreview,
 } from "./api";
 
@@ -530,7 +536,6 @@ function CheckPage({
   const [output, setOutput] = useLocalState("check.output", "");
   const [templateName, setTemplateName] = useLocalState("check.template", "默认模板");
   const [autoOpen, setAutoOpen] = useLocalState("check.autoOpen", settings.autoOpenResult);
-  const [checkEngine, setCheckEngine] = useLocalState("check.engine", "python");
   const [result, setResult] = useState<CheckResult | null>(null);
   const [notice, setNotice] = useState<{ tone: "warning" | "error"; title: string; lines: string[] } | null>(null);
   const selectedTemplate = templates.find((item) => item.name === templateName) || templates[0] || DEFAULT_TEMPLATE;
@@ -550,9 +555,7 @@ function CheckPage({
         output_path: output || null,
         template: selectedTemplate,
       };
-      const data = checkEngine === "rust"
-        ? await checkRust<CheckResult>(payload)
-        : await backend<CheckResult>("check", payload);
+      const data = await checkRust<CheckResult>(payload);
       setResult(data);
       onResult(data);
       addLog(`核对完成: ${data.mismatch_count} 个不一致`);
@@ -606,18 +609,6 @@ function CheckPage({
           />
           <LayoutTemplate size={17} />
         </div>
-        <div className="form-row">
-          <label>核对引擎</label>
-          <CustomSelect
-            value={checkEngine}
-            options={[
-              { value: "python", label: "Python 稳定版" },
-              { value: "rust", label: "Rust 实验版" },
-            ]}
-            onChange={setCheckEngine}
-          />
-          <FileCheck2 size={17} />
-        </div>
         <PathRow label="结果另存为" value={output} kind="save" extensions={["xlsx"]} placeholder={settings.defaultOutputDir || "留空则自动生成结果文件"} onChange={setOutput} />
         <div className="option-row">
           <Toggle checked={autoOpen} onChange={setAutoOpen} label="自动打开结果" />
@@ -668,7 +659,6 @@ function GeneratePage({
   const [morningEnd, setMorningEnd] = useLocalState("generate.morningEnd", settings.morningEnd);
   const [afternoonStart, setAfternoonStart] = useLocalState("generate.afternoonStart", settings.afternoonStart);
   const [afternoonEnd, setAfternoonEnd] = useLocalState("generate.afternoonEnd", settings.afternoonEnd);
-  const [generateEngine, setGenerateEngine] = useLocalState("generate.engine", "python");
   const [previewRows, setPreviewRows] = useState<EmployeePreviewRow[]>([]);
   const [previewLoaded, setPreviewLoaded] = useState(false);
 
@@ -678,7 +668,7 @@ function GeneratePage({
       return;
     }
     try {
-      const data = await backend<WorkbookPreview>("inspect_workbook", { path: tableC, max_rows: 60, max_cols: 8 });
+      const data: WorkbookPreview = await inspectWorkbookRust(tableC, 60, 8);
       const sheet = data.sheets[0];
       const grouped = new Map<number, string[]>();
       for (const cell of sheet?.cells || []) {
@@ -720,9 +710,7 @@ function GeneratePage({
         afternoon_end: afternoonEnd,
         normal_hours: normalHours,
       };
-      const data = generateEngine === "rust"
-        ? await generateRust<GenerateResult>(payload)
-        : await backend<GenerateResult>("generate", payload);
+      const data = await generateRust<GenerateResult>(payload);
       onResult(data);
       addLog(`生成完成: ${data.generated_count} 份`);
       if ((data as GenerateResult & { warnings?: string[] }).warnings?.length) {
@@ -753,18 +741,6 @@ function GeneratePage({
       <div className="panel">
         <PathRow label="汇总表" value={tableC} kind="file" extensions={["xlsx", "xlsm"]} onChange={setTableC} />
         <PathRow label="考勤表模板" value={templateB} kind="file" extensions={["xlsx", "xlsm"]} onChange={setTemplateB} />
-        <div className="form-row">
-          <label>生成引擎</label>
-          <CustomSelect
-            value={generateEngine}
-            options={[
-              { value: "python", label: "Python 稳定版" },
-              { value: "rust", label: "Rust 实验版" },
-            ]}
-            onChange={setGenerateEngine}
-          />
-          <Wand2 size={17} />
-        </div>
         <PathRow label="输出目录" value={outputDir} kind="folder" placeholder={settings.defaultOutputDir || "选择输出目录"} onChange={setOutputDir} />
       </div>
 
@@ -853,7 +829,7 @@ function TemplatesPage({
 
   async function saveTemplate() {
     try {
-      const data = await backend<{ template: CheckTemplate }>("save_template", { template: current });
+      const data = await saveTemplateRust(current);
       setTemplates([...templates.filter((item) => item.name !== data.template.name), data.template]);
       addLog(`已保存模板: ${data.template.name}`);
     } catch (error) {
@@ -863,7 +839,7 @@ function TemplatesPage({
 
   async function deleteTemplate() {
     try {
-      await backend("delete_template", { name: current.name });
+      await deleteTemplateRust(current.name);
       const next = templates.filter((item) => item.name !== current.name);
       setTemplates(next.length ? next : [DEFAULT_TEMPLATE]);
       setCurrent(next[0] || DEFAULT_TEMPLATE);
@@ -879,7 +855,7 @@ function TemplatesPage({
     try {
       const content = await readTextFile(path);
       const templateData = JSON.parse(content.replace(/^\uFEFF/, ""));
-      const data = await backend<{ templates: CheckTemplate[] }>("load_template_file", { path, template_data: templateData });
+      const data = await loadTemplateFileRust(path, templateData);
       const incomingTemplates = normalizeTemplates(data.templates);
       const merged = templates.filter((item) => !incomingTemplates.some((incoming) => incoming.name === item.name));
       setTemplates([...merged, ...incomingTemplates]);
@@ -894,7 +870,7 @@ function TemplatesPage({
     const path = await choosePath("save", ["json"]);
     if (!path) return;
     try {
-      await backend("export_template_file", { path, template: current });
+      await exportTemplateFileRust(path, current);
       addLog(`已导出模板: ${path}`);
     } catch (error) {
       addLog(error instanceof Error ? error.message : String(error));
@@ -903,7 +879,7 @@ function TemplatesPage({
 
   async function validateTemplate() {
     try {
-      await backend("validate_template", { template: current });
+      await validateTemplateRust(current);
       addLog(`模板有效: ${current.name}`);
     } catch (error) {
       addLog(error instanceof Error ? error.message : String(error));
@@ -977,7 +953,7 @@ export default function App() {
   const [generateResult, setGenerateResult] = useState<GenerateResult | null>(null);
 
   useEffect(() => {
-    backend<{ templates: CheckTemplate[] }>("list_templates", {})
+    listTemplatesRust()
       .then((data) => setTemplates(data.templates.length ? normalizeTemplates(data.templates) : [DEFAULT_TEMPLATE]))
       .catch((error) => addLog(error instanceof Error ? error.message : String(error)));
   }, []);

@@ -23,7 +23,7 @@ pub struct CheckPayload {
     pub position_rules_path: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckTemplate {
     pub name: String,
     pub number_column: String,
@@ -31,7 +31,7 @@ pub struct CheckTemplate {
     pub rules: Vec<CheckRule>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckRule {
     pub field_name: String,
     pub main_range: String,
@@ -95,8 +95,39 @@ struct Workbook {
 
 #[derive(Debug)]
 struct WorkbookSheet {
+    display_name: String,
     part_name: String,
     sheet: Sheet,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkbookPreview {
+    pub path: String,
+    pub sheets: Vec<WorkbookSheetPreview>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkbookSheetPreview {
+    pub name: String,
+    pub part_name: String,
+    pub bounds: WorkbookBounds,
+    pub cells: Vec<WorkbookCellPreview>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkbookBounds {
+    pub max_row: u32,
+    pub max_col: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkbookCellPreview {
+    pub ref_name: String,
+    #[serde(rename = "ref")]
+    pub cell_ref: String,
+    pub row: u32,
+    pub col: String,
+    pub value: String,
 }
 
 pub fn run_check(payload: CheckPayload) -> Result<CheckResult, String> {
@@ -129,7 +160,7 @@ pub fn run_check(payload: CheckPayload) -> Result<CheckResult, String> {
     };
     let table_b_index = build_table_b_index(&table_bs_folder)?;
     let mut warnings = table_b_index.warnings;
-    warnings.push(format!("Rust 实验版核对模板: {}", payload.template.name));
+    warnings.push(format!("核对模板: {}", payload.template.name));
 
     let table_a_book = Workbook::open(&table_a_path)?;
     let table_a_sheet_info = table_a_book
@@ -196,6 +227,57 @@ pub fn run_check(payload: CheckPayload) -> Result<CheckResult, String> {
         warnings,
         progress,
     })
+}
+
+pub fn validate_template(template: &CheckTemplate) -> Result<usize, String> {
+    Ok(parse_rules(template)?.len())
+}
+
+pub fn inspect_workbook(path: &str, max_rows: u32, max_cols: u32) -> Result<WorkbookPreview, String> {
+    let book = Workbook::open(Path::new(path))?;
+    let mut sheets = Vec::new();
+    for item in &book.sheets {
+        let bounds = used_bounds(&item.sheet);
+        let mut cells = Vec::new();
+        for row in 1..=bounds.max_row.min(max_rows) {
+            for col_index in 1..=bounds.max_col.min(max_cols) {
+                let col = num_to_col(col_index);
+                let cell_ref = format!("{col}{row}");
+                let value = to_display(item.sheet.get_value(&cell_ref));
+                if !value.is_empty() {
+                    cells.push(WorkbookCellPreview {
+                        ref_name: cell_ref.clone(),
+                        cell_ref,
+                        row,
+                        col,
+                        value,
+                    });
+                }
+            }
+        }
+        sheets.push(WorkbookSheetPreview {
+            name: item.display_name.clone(),
+            part_name: item.part_name.clone(),
+            bounds,
+            cells,
+        });
+    }
+    Ok(WorkbookPreview {
+        path: path.to_string(),
+        sheets,
+    })
+}
+
+fn used_bounds(sheet: &Sheet) -> WorkbookBounds {
+    let mut max_row = 1;
+    let mut max_col = 1;
+    for ref_name in sheet.cells.keys() {
+        if let Ok((col, row)) = split_cell_ref(ref_name) {
+            max_row = max_row.max(row);
+            max_col = max_col.max(col_to_num(&col));
+        }
+    }
+    WorkbookBounds { max_row, max_col }
 }
 
 struct TableBIndex {
@@ -304,6 +386,7 @@ fn load_workbook_sheets(entries: &HashMap<String, Vec<u8>>, shared_strings: &[St
         workbook_buf.clear();
         match workbook_reader.read_event_into(&mut workbook_buf) {
             Ok(Event::Empty(event)) | Ok(Event::Start(event)) if local_name(event.name().as_ref()) == b"sheet" => {
+                let display_name = xml_attr(&workbook_reader, &event, b"name").unwrap_or_else(|| "Sheet".to_string());
                 let rel_id = xml_attr(&workbook_reader, &event, b"r:id").or_else(|| xml_attr(&workbook_reader, &event, b"id"));
                 let Some(rel_id) = rel_id else {
                     continue;
@@ -318,6 +401,7 @@ fn load_workbook_sheets(entries: &HashMap<String, Vec<u8>>, shared_strings: &[St
                     .get(target)
                     .ok_or_else(|| format!("Excel 缺少工作表文件: {target}"))?;
                 sheets.push(WorkbookSheet {
+                    display_name,
                     part_name: target.clone(),
                     sheet: parse_sheet(raw, shared_strings)?,
                 });
@@ -1444,6 +1528,7 @@ mod tests {
             main_start_row: 1,
         }];
         let fallback_sheet = WorkbookSheet {
+            display_name: "Sheet1".to_string(),
             part_name: "xl/worksheets/sheet1.xml".to_string(),
             sheet: Sheet {
                 cells: HashMap::from([
@@ -1455,6 +1540,7 @@ mod tests {
             },
         };
         let template_sheet = WorkbookSheet {
+            display_name: "Sheet2".to_string(),
             part_name: "xl/worksheets/sheet2.xml".to_string(),
             sheet: Sheet {
                 cells: HashMap::from([("Z9".to_string(), "x".to_string())]),
@@ -1468,9 +1554,10 @@ mod tests {
     #[test]
     fn rust_check_real_files_when_available() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
-        let table_a = root.join("6月岗位外包工资表-26.7.3.xlsx");
-        let table_bs = root.join("考勤表-编辑版-307人");
-        let template_path = root.join("外包模板-WEP-2026.5.15.json");
+        let fixture_dir = root.join("fixtures").join("manual");
+        let table_a = fixture_dir.join("6月岗位外包工资表-26.7.3.xlsx");
+        let table_bs = fixture_dir.join("考勤表-编辑版-307人");
+        let template_path = fixture_dir.join("外包模板-WEP-2026.5.15.json");
         if !(table_a.exists() && table_bs.exists() && template_path.exists()) {
             return;
         }

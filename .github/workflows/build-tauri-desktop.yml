@@ -12,14 +12,9 @@ on:
     paths:
       - "src/**"
       - "src-tauri/**"
-      - "python_backend/**"
-      - "excel_check_tool.py"
-      - "generate_table_bs.py"
-      - "backend_cli.spec"
       - "index.html"
       - "package.json"
       - "package-lock.json"
-      - "requirements.txt"
       - "vite.config.ts"
       - "tsconfig.json"
       - "Nothing_You_Could_Do/**"
@@ -40,13 +35,6 @@ jobs:
           node-version: "22"
           cache: "npm"
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: "pip"
-          cache-dependency-path: requirements.txt
-
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -66,23 +54,21 @@ jobs:
             tauri-tools-windows-
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-          npm ci
-
-      - name: Build Python sidecar
-        shell: pwsh
-        run: |
-          if (Test-Path dist-sidecar) { Remove-Item -Recurse -Force dist-sidecar }
-          python -m PyInstaller --clean --distpath dist-sidecar backend_cli.spec
+        run: npm ci
 
       - name: Build frontend
         run: npm run build
 
-      - name: Remove stale helper binaries
+      - name: Remove stale Python and helper build artifacts
         shell: pwsh
         run: |
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue dist-sidecar
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue src-tauri/target/release/dist-sidecar
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue src-tauri/target/release/python_backend
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue src-tauri/target/release/_up_/dist-sidecar
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue src-tauri/target/release/_up_/python_backend
+          Remove-Item -Force -ErrorAction SilentlyContinue src-tauri/target/release/_up_/excel_check_tool.py
+          Remove-Item -Force -ErrorAction SilentlyContinue src-tauri/target/release/_up_/generate_table_bs.py
           Remove-Item -Force -ErrorAction SilentlyContinue src-tauri/target/release/rust_check_cli.exe
           Remove-Item -Force -ErrorAction SilentlyContinue src-tauri/target/release/rust_generate_cli.exe
 
@@ -118,13 +104,6 @@ jobs:
           node-version: "22"
           cache: "npm"
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: "pip"
-          cache-dependency-path: requirements.txt
-
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -145,21 +124,16 @@ jobs:
             tauri-tools-macos-
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-          npm ci
-
-      - name: Build Python sidecar
-        run: |
-          rm -rf dist-sidecar
-          python -m PyInstaller --clean --distpath dist-sidecar backend_cli.spec
+        run: npm ci
 
       - name: Build frontend
         run: npm run build
 
-      - name: Remove stale helper binaries
+      - name: Remove stale Python and helper build artifacts
         run: |
+          rm -rf dist-sidecar src-tauri/target/release/dist-sidecar src-tauri/target/release/python_backend
+          rm -rf src-tauri/target/release/_up_/dist-sidecar src-tauri/target/release/_up_/python_backend
+          rm -f src-tauri/target/release/_up_/excel_check_tool.py src-tauri/target/release/_up_/generate_table_bs.py
           rm -f src-tauri/target/release/rust_check_cli src-tauri/target/release/rust_generate_cli
 
       - name: Build macOS app

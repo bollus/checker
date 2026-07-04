@@ -2,11 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::env;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::process::Command;
 use tauri::Manager;
 
 pub mod rust_check;
@@ -36,32 +33,6 @@ struct BackendEnvelope {
     traceback: Option<String>,
 }
 
-#[derive(Debug)]
-struct BackendCommand {
-    program: PathBuf,
-    args: Vec<String>,
-}
-
-struct BackendProcess {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
-}
-
-struct BackendState {
-    process: Mutex<Option<BackendProcess>>,
-}
-
-static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
-
-fn executable_name(base: &str) -> String {
-    if cfg!(target_os = "windows") {
-        format!("{base}.exe")
-    } else {
-        base.to_string()
-    }
-}
-
 fn find_file_recursively(root: &Path, file_name: &str, max_depth: usize) -> Option<PathBuf> {
     if max_depth == 0 || !root.is_dir() {
         return None;
@@ -76,61 +47,6 @@ fn find_file_recursively(root: &Path, file_name: &str, max_depth: usize) -> Opti
             if let Some(found) = find_file_recursively(&path, file_name, max_depth - 1) {
                 return Some(found);
             }
-        }
-    }
-    None
-}
-
-fn find_python() -> String {
-    if cfg!(target_os = "windows") {
-        "python".to_string()
-    } else {
-        "python3".to_string()
-    }
-}
-
-fn bundled_backend(app: &tauri::AppHandle) -> Option<PathBuf> {
-    let name = executable_name("excel-check-backend");
-    let mut roots: Vec<PathBuf> = Vec::new();
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        roots.push(resource_dir);
-    }
-    if let Ok(exe_path) = env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            roots.push(exe_dir.to_path_buf());
-        }
-    }
-    if let Ok(current_dir) = env::current_dir() {
-        roots.push(current_dir);
-    }
-
-    for root in roots {
-        for candidate in [
-            root.join(&name),
-            root.join("dist-sidecar").join(&name),
-            root.join("python_backend").join(&name),
-            root.join("resources").join(&name),
-            root.join("resources").join("dist-sidecar").join(&name),
-        ] {
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-        if let Some(found) = find_file_recursively(&root, &name, 4) {
-            return Some(found);
-        }
-    }
-    None
-}
-
-fn dev_backend_script() -> Option<PathBuf> {
-    let cwd = env::current_dir().ok()?;
-    for candidate in [
-        cwd.join("python_backend").join("backend_cli.py"),
-        cwd.parent()?.join("python_backend").join("backend_cli.py"),
-    ] {
-        if candidate.exists() {
-            return Some(candidate);
         }
     }
     None
@@ -153,7 +69,6 @@ fn find_resource_file(app: &tauri::AppHandle, file_name: &str) -> Option<PathBuf
         for candidate in [
             root.join(file_name),
             root.join("resources").join(file_name),
-            root.join("python_backend").join(file_name),
         ] {
             if candidate.is_file() {
                 return Some(candidate);
@@ -166,114 +81,55 @@ fn find_resource_file(app: &tauri::AppHandle, file_name: &str) -> Option<PathBuf
     None
 }
 
-
-fn backend_command(app: &tauri::AppHandle) -> Result<BackendCommand, String> {
-    if let Ok(path) = env::var("EXCEL_CHECK_BACKEND") {
-        let candidate = PathBuf::from(path);
-        if candidate.is_file() {
-            return Ok(BackendCommand {
-                program: candidate,
-                args: vec![],
-            });
-        }
-    }
-
-    if let Some(path) = bundled_backend(app) {
-        return Ok(BackendCommand {
-            program: path,
-            args: vec![],
-        });
-    }
-
-    if let Some(script) = dev_backend_script() {
-        return Ok(BackendCommand {
-            program: PathBuf::from(find_python()),
-            args: vec![script.to_string_lossy().to_string()],
-        });
-    }
-
-    Err("未找到 Python 后端。开发环境请确认 python_backend/backend_cli.py 存在；打包环境请确认 sidecar 已随应用发布。".to_string())
+fn template_store_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|err| format!("获取应用数据目录失败: {err}"))?;
+    fs::create_dir_all(&dir).map_err(|err| format!("创建应用数据目录失败: {err}"))?;
+    Ok(dir.join("check_templates.json"))
 }
 
-#[tauri::command]
-async fn run_backend(app: tauri::AppHandle, state: tauri::State<'_, BackendState>, action: String, payload: Value) -> Result<BackendEnvelope, String> {
-    let mut guard = state
-        .process
-        .lock()
-        .map_err(|_| "后端状态锁定失败".to_string())?;
-    match run_backend_persistent(&app, &mut guard, &action, payload.clone()) {
-        Ok(envelope) => Ok(envelope),
-        Err(first_error) => {
-            if let Some(mut process) = guard.take() {
-                let _ = process.child.kill();
-                let _ = process.child.wait();
+fn parse_templates_value(value: Value) -> Result<Vec<rust_check::CheckTemplate>, String> {
+    if value.is_array() {
+        serde_json::from_value(value).map_err(|err| format!("模板 JSON 格式无效: {err}"))
+    } else if value.get("templates").is_some() {
+        serde_json::from_value(value.get("templates").cloned().unwrap_or(Value::Array(vec![])))
+            .map_err(|err| format!("模板 JSON 格式无效: {err}"))
+    } else {
+        serde_json::from_value(value)
+            .map(|template| vec![template])
+            .map_err(|err| format!("模板 JSON 格式无效: {err}"))
+    }
+}
+
+fn read_templates_from_path(path: &Path) -> Result<Vec<rust_check::CheckTemplate>, String> {
+    let raw = fs::read_to_string(path).map_err(|err| format!("读取模板失败: {err}\n路径: {}", path.display()))?;
+    let value: Value = serde_json::from_str(raw.trim_start_matches('\u{feff}'))
+        .map_err(|err| format!("解析模板 JSON 失败: {err}\n路径: {}", path.display()))?;
+    parse_templates_value(value)
+}
+
+fn read_templates(app: &tauri::AppHandle) -> Vec<rust_check::CheckTemplate> {
+    if let Ok(path) = template_store_path(app) {
+        if path.is_file() {
+            if let Ok(templates) = read_templates_from_path(&path) {
+                return templates;
             }
-            run_backend_persistent(&app, &mut guard, &action, payload)
-                .map_err(|second_error| format!("{second_error}\n首次尝试失败: {first_error}"))
         }
     }
+    if let Some(path) = find_resource_file(app, "check_templates.json") {
+        if let Ok(templates) = read_templates_from_path(&path) {
+            return templates;
+        }
+    }
+    Vec::new()
 }
 
-fn spawn_backend_process(app: &tauri::AppHandle) -> Result<BackendProcess, String> {
-    let backend = backend_command(app)?;
-    let mut command = Command::new(&backend.program);
-    let mut args = backend.args.clone();
-    args.push("--serve".to_string());
-    command
-        .args(&args)
-        .env("PYTHONUTF8", "1")
-        .env("PYTHONIOENCODING", "utf-8")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = hide_console_window(&mut command)
-        .spawn()
-        .map_err(|err| format!("启动后端失败: {err}"))?;
-    let stdin = child.stdin.take().ok_or_else(|| "后端 stdin 初始化失败".to_string())?;
-    let stdout = child.stdout.take().ok_or_else(|| "后端 stdout 初始化失败".to_string())?;
-    Ok(BackendProcess {
-        child,
-        stdin,
-        stdout: BufReader::new(stdout),
-    })
-}
-
-fn run_backend_persistent(
-    app: &tauri::AppHandle,
-    process_slot: &mut Option<BackendProcess>,
-    action: &str,
-    payload: Value,
-) -> Result<BackendEnvelope, String> {
-    if process_slot.is_none() {
-        *process_slot = Some(spawn_backend_process(app)?);
-    }
-    let process = process_slot.as_mut().ok_or_else(|| "后端进程未启动".to_string())?;
-    let id = REQUEST_ID.fetch_add(1, Ordering::Relaxed);
-    let request = json!({ "id": id, "action": action, "payload": payload }).to_string();
-    process
-        .stdin
-        .write_all(request.as_bytes())
-        .map_err(|err| format!("写入后端参数失败: {err}"))?;
-    process
-        .stdin
-        .write_all(b"\n")
-        .map_err(|err| format!("写入后端参数失败: {err}"))?;
-    process
-        .stdin
-        .flush()
-        .map_err(|err| format!("刷新后端参数失败: {err}"))?;
-
-    let mut line = String::new();
-    process
-        .stdout
-        .read_line(&mut line)
-        .map_err(|err| format!("读取后端结果失败: {err}"))?;
-    if line.trim().is_empty() {
-        return Err("后端没有返回结果".to_string());
-    }
-    let envelope: BackendEnvelope = serde_json::from_str(line.trim())
-        .map_err(|err| format!("后端返回格式无效: {err}\nSTDOUT:\n{line}"))?;
-    Ok(envelope)
+fn write_templates(app: &tauri::AppHandle, templates: &[rust_check::CheckTemplate]) -> Result<(), String> {
+    let path = template_store_path(app)?;
+    let raw = serde_json::to_string_pretty(templates).map_err(|err| format!("序列化模板失败: {err}"))?;
+    fs::write(&path, raw).map_err(|err| format!("保存模板失败: {err}\n路径: {}", path.display()))
 }
 
 #[tauri::command]
@@ -326,6 +182,62 @@ async fn open_path(path: String) -> Result<(), String> {
 #[tauri::command]
 async fn read_text_file(path: String) -> Result<String, String> {
     fs::read_to_string(&path).map_err(|err| format!("读取文件失败: {err}\n路径: {path}"))
+}
+
+#[tauri::command]
+async fn list_templates_rust(app: tauri::AppHandle) -> Result<Value, String> {
+    Ok(json!({ "templates": read_templates(&app) }))
+}
+
+#[tauri::command]
+async fn save_template_rust(app: tauri::AppHandle, template: rust_check::CheckTemplate) -> Result<Value, String> {
+    rust_check::validate_template(&template)?;
+    let mut templates = read_templates(&app);
+    templates.retain(|item| item.name != template.name);
+    templates.push(template.clone());
+    write_templates(&app, &templates)?;
+    Ok(json!({ "template": template }))
+}
+
+#[tauri::command]
+async fn delete_template_rust(app: tauri::AppHandle, name: String) -> Result<Value, String> {
+    let mut templates = read_templates(&app);
+    templates.retain(|item| item.name != name);
+    write_templates(&app, &templates)?;
+    Ok(json!({ "deleted": name }))
+}
+
+#[tauri::command]
+async fn load_template_file_rust(path: String, template_data: Value) -> Result<Value, String> {
+    let templates = if template_data.is_null() {
+        read_templates_from_path(Path::new(&path))?
+    } else {
+        parse_templates_value(template_data)?
+    };
+    for template in &templates {
+        rust_check::validate_template(template)?;
+    }
+    Ok(json!({ "templates": templates }))
+}
+
+#[tauri::command]
+async fn export_template_file_rust(path: String, template: rust_check::CheckTemplate) -> Result<Value, String> {
+    rust_check::validate_template(&template)?;
+    let raw = serde_json::to_string_pretty(&template).map_err(|err| format!("序列化模板失败: {err}"))?;
+    fs::write(&path, raw).map_err(|err| format!("导出模板失败: {err}\n路径: {path}"))?;
+    Ok(json!({ "path": path }))
+}
+
+#[tauri::command]
+async fn validate_template_rust(template: rust_check::CheckTemplate) -> Result<Value, String> {
+    let rule_count = rust_check::validate_template(&template)?;
+    Ok(json!({ "rule_count": rule_count, "template": template }))
+}
+
+#[tauri::command]
+async fn inspect_workbook_rust(path: String, max_rows: Option<u32>, max_cols: Option<u32>) -> Result<Value, String> {
+    let data = rust_check::inspect_workbook(&path, max_rows.unwrap_or(80), max_cols.unwrap_or(30))?;
+    serde_json::to_value(data).map_err(|err| format!("序列化预览失败: {err}"))
 }
 
 #[tauri::command]
@@ -405,11 +317,21 @@ async fn run_generate_rust(app: tauri::AppHandle, payload: Value) -> Result<Back
 
 pub fn run() {
     tauri::Builder::default()
-        .manage(BackendState {
-            process: Mutex::new(None),
-        })
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![run_backend, run_check_rust, run_generate_rust, reveal_path, open_path, read_text_file])
+        .invoke_handler(tauri::generate_handler![
+            run_check_rust,
+            run_generate_rust,
+            list_templates_rust,
+            save_template_rust,
+            delete_template_rust,
+            load_template_file_rust,
+            export_template_file_rust,
+            validate_template_rust,
+            inspect_workbook_rust,
+            reveal_path,
+            open_path,
+            read_text_file
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
