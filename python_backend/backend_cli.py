@@ -26,10 +26,54 @@ def read_request() -> Dict[str, Any]:
     raw = sys.stdin.read()
     if not raw.strip():
         raise check_tool.WorkbookError("没有收到任务参数")
-    data = json.loads(raw)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        if "Invalid \\escape" not in exc.msg:
+            raise
+        data = json.loads(escape_invalid_json_backslashes(raw))
     if not isinstance(data, dict):
         raise check_tool.WorkbookError("任务参数必须是 JSON 对象")
     return data
+
+
+def escape_invalid_json_backslashes(text: str) -> str:
+    result: List[str] = []
+    index = 0
+    in_string = False
+    escape = False
+    valid_escapes = {'"', "\\", "/", "b", "f", "n", "r", "t", "u"}
+    while index < len(text):
+        char = text[index]
+        if not in_string:
+            result.append(char)
+            if char == '"':
+                in_string = True
+            index += 1
+            continue
+        if escape:
+            if char not in valid_escapes:
+                result.append("\\\\")
+                result.append(char)
+                escape = False
+                index += 1
+                continue
+            result.append("\\")
+            result.append(char)
+            escape = False
+            index += 1
+            continue
+        if char == "\\":
+            escape = True
+            index += 1
+            continue
+        result.append(char)
+        if char == '"':
+            in_string = False
+        index += 1
+    if escape:
+        result.append("\\\\")
+    return "".join(result)
 
 
 def ok(data: Dict[str, Any]) -> Dict[str, Any]:
