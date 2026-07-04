@@ -198,14 +198,111 @@ def action_validate_template(payload: Dict[str, Any]) -> Dict[str, Any]:
     return ok({"rule_count": len(parsed), "template": check_tool.template_to_dict(template)})
 
 
+def strip_json_comments(text: str) -> str:
+    result: List[str] = []
+    index = 0
+    in_string = False
+    escape = False
+    while index < len(text):
+        char = text[index]
+        next_char = text[index + 1] if index + 1 < len(text) else ""
+        if in_string:
+            result.append(char)
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            result.append(char)
+            index += 1
+            continue
+        if char == "/" and next_char == "/":
+            while index < len(text) and text[index] not in "\r\n":
+                index += 1
+            continue
+        if char == "/" and next_char == "*":
+            index += 2
+            while index + 1 < len(text) and not (text[index] == "*" and text[index + 1] == "/"):
+                index += 1
+            index += 2
+            continue
+        result.append(char)
+        index += 1
+    return "".join(result)
+
+
+def remove_trailing_json_commas(text: str) -> str:
+    result: List[str] = []
+    index = 0
+    in_string = False
+    escape = False
+    while index < len(text):
+        char = text[index]
+        if in_string:
+            result.append(char)
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            result.append(char)
+            index += 1
+            continue
+        if char == ",":
+            lookahead = index + 1
+            while lookahead < len(text) and text[lookahead].isspace():
+                lookahead += 1
+            if lookahead < len(text) and text[lookahead] in "}]":
+                index += 1
+                continue
+        result.append(char)
+        index += 1
+    return "".join(result)
+
+
+def parse_template_json(content: str, source: str = "模板文件") -> Any:
+    text = content.lstrip("\ufeff").strip()
+    candidates = [
+        text,
+        remove_trailing_json_commas(strip_json_comments(text)),
+    ]
+    last_error: Optional[json.JSONDecodeError] = None
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+    if last_error is None:
+        raise check_tool.WorkbookError(f"{source} JSON 格式无效")
+    start = max(0, last_error.pos - 80)
+    end = min(len(text), last_error.pos + 80)
+    snippet = text[start:end].replace("\r", "\\r").replace("\n", "\\n")
+    raise check_tool.WorkbookError(
+        f"{source} JSON 格式无效: 第 {last_error.lineno} 行，第 {last_error.colno} 列，{last_error.msg}\n"
+        f"附近内容: {snippet}"
+    )
+
+
 def action_load_template_file(payload: Dict[str, Any]) -> Dict[str, Any]:
-    if "content" in payload:
-        data = json.loads(str(payload["content"]))
+    if "template_data" in payload:
+        data = payload["template_data"]
+    elif "content" in payload:
+        data = parse_template_json(str(payload["content"]))
     else:
         path = Path(payload["path"])
         if not path.exists():
             raise check_tool.WorkbookError(f"未找到模板文件: {path}")
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = parse_template_json(path.read_text(encoding="utf-8-sig"), str(path))
     if isinstance(data, list):
         templates = [check_tool.template_to_dict(check_tool.check_template_from_dict(item)) for item in data if isinstance(item, dict)]
     elif isinstance(data, dict):

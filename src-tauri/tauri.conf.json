@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "表格核对工具",
+  "productName": "ExcelCheckTool",
   "version": "0.2.0",
   "identifier": "com.ray.excel-check-tool",
   "build": {

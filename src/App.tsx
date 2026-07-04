@@ -852,14 +852,15 @@ function TemplatesPage({
     if (!path) return;
     try {
       const content = await readTextFile(path);
-      const data = await backend<{ templates: CheckTemplate[] }>("load_template_file", { path, content });
+      const templateData = JSON.parse(content.replace(/^\uFEFF/, ""));
+      const data = await backend<{ templates: CheckTemplate[] }>("load_template_file", { path, template_data: templateData });
       const incomingTemplates = normalizeTemplates(data.templates);
       const merged = templates.filter((item) => !incomingTemplates.some((incoming) => incoming.name === item.name));
       setTemplates([...merged, ...incomingTemplates]);
       setCurrent(incomingTemplates[0]);
       addLog(`已导入模板: ${incomingTemplates.map((item) => item.name).join(", ")}`);
     } catch (error) {
-      addLog(error instanceof Error ? error.message : String(error));
+      addLog(`导入模板失败: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
