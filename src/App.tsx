@@ -12,7 +12,6 @@ import {
   FileCheck2,
   FileSpreadsheet,
   FolderOpen,
-  History,
   Import,
   LayoutTemplate,
   Loader2,
@@ -21,13 +20,12 @@ import {
   Plus,
   RotateCcw,
   Save,
-  Search,
   Square,
   Trash2,
   Wand2,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   backend,
   CheckResult,
@@ -42,24 +40,8 @@ import {
   WorkbookPreview,
 } from "./api";
 
-type Page = "check" | "generate" | "templates" | "history";
+type Page = "check" | "generate" | "templates";
 type BusyState = "idle" | "checking" | "generating";
-type TaskStatus = "成功" | "失败" | "有警告";
-type TaskType = "工资表核对" | "生成考勤表";
-
-interface HistoryItem {
-  id: string;
-  time: string;
-  type: TaskType;
-  source: string;
-  template: string;
-  outputPath: string;
-  reportPath: string;
-  status: TaskStatus;
-  mismatchCount?: number;
-  generatedCount?: number;
-  mismatches?: Mismatch[];
-}
 
 interface AppSettings {
   defaultPayrollDir: string;
@@ -194,10 +176,6 @@ function shortPath(path: string) {
   const parts = path.split(/[\\/]/).filter(Boolean);
   if (parts.length <= 3) return path;
   return `${parts[0]}/.../${parts.slice(-2).join("/")}`;
-}
-
-function nowText() {
-  return new Date().toLocaleString();
 }
 
 function useLocalState<T>(key: string, initial: T) {
@@ -368,7 +346,7 @@ function DetailPanel({
   selectedTemplate,
   checkResult,
   generateResult,
-  selectedHistory,
+  addLog,
   log,
 }: {
   page: Page;
@@ -376,13 +354,27 @@ function DetailPanel({
   selectedTemplate: CheckTemplate;
   checkResult: CheckResult | null;
   generateResult: GenerateResult | null;
-  selectedHistory: HistoryItem | null;
+  addLog: (text: string) => void;
   log: string[];
 }) {
-  const latestPath = selectedHistory?.outputPath || checkResult?.output_path || generateResult?.output_dir || "";
-  const reportPath = selectedHistory?.reportPath || checkResult?.report_path || generateResult?.report_path || "";
+  const latestPath = checkResult?.output_path || generateResult?.output_dir || "";
+  const reportPath = checkResult?.report_path || generateResult?.report_path || "";
   const title = page === "templates" ? "模板状态" : "任务详情";
   const isWorking = busy !== "idle";
+  async function openSafely(path: string) {
+    try {
+      await openPath(path);
+    } catch (error) {
+      addLog(`打开失败: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  async function revealSafely(path: string) {
+    try {
+      await revealPath(path);
+    } catch (error) {
+      addLog(`定位失败: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
 
   return (
     <aside className="details-pane">
@@ -402,20 +394,15 @@ function DetailPanel({
         <div className="metric-list">
           <div><span>任务状态</span><strong>{busy === "generating" ? "正在生成" : generateResult ? "生成完成" : "未开始"}</strong></div>
           <div><span>生成数量</span><strong>{generateResult ? `${generateResult.generated_count} 份` : "0 份"}</strong></div>
+          <div><span>处理进度</span><strong>{generateResult?.progress?.total ? `${generateResult.progress.current}/${generateResult.progress.total}` : "未开始"}</strong></div>
           <div><span>输出目录</span><strong>{generateResult ? shortPath(generateResult.output_dir) : "未生成"}</strong></div>
           <div><span>报告</span><strong>{generateResult ? fileName(generateResult.report_path) : "未生成"}</strong></div>
-        </div>
-      ) : page === "history" ? (
-        <div className="metric-list">
-          <div><span>选中任务</span><strong>{selectedHistory ? selectedHistory.type : "未选择"}</strong></div>
-          <div><span>任务时间</span><strong>{selectedHistory ? selectedHistory.time : "无"}</strong></div>
-          <div><span>状态</span><strong>{selectedHistory ? selectedHistory.status : "无"}</strong></div>
-          <div><span>结果</span><strong>{selectedHistory?.mismatchCount !== undefined ? `${selectedHistory.mismatchCount} 个不一致` : selectedHistory?.generatedCount !== undefined ? `${selectedHistory.generatedCount} 份` : "无"}</strong></div>
         </div>
       ) : (
         <div className="metric-list">
           <div><span>任务状态</span><strong>{busy === "checking" ? "正在核对" : checkResult ? "核对完成" : "未开始"}</strong></div>
           <div><span>核对模板</span><strong>{selectedTemplate.name}</strong></div>
+          <div><span>处理进度</span><strong>{checkResult?.progress?.total ? `${checkResult.progress.current}/${checkResult.progress.total}` : "未开始"}</strong></div>
           <div><span>不一致数量</span><strong>{checkResult ? `${checkResult.mismatch_count} 个` : "0 个"}</strong></div>
           <div><span>结果文件</span><strong>{checkResult ? fileName(checkResult.output_path) : "未生成"}</strong></div>
         </div>
@@ -423,13 +410,13 @@ function DetailPanel({
 
       {latestPath || reportPath ? (
         <div className="action-stack">
-          <button disabled={!latestPath} onClick={() => openPath(latestPath)}>
+          <button disabled={!latestPath} onClick={() => openSafely(latestPath)}>
             <ExternalLink size={16} />打开结果
           </button>
-          <button disabled={!latestPath} onClick={() => revealPath(latestPath)}>
+          <button disabled={!latestPath} onClick={() => revealSafely(latestPath)}>
             <FolderOpen size={16} />定位文件
           </button>
-          <button disabled={!reportPath} onClick={() => openPath(reportPath)}>
+          <button disabled={!reportPath} onClick={() => openSafely(reportPath)}>
             <FileCheck2 size={16} />打开报告
           </button>
         </div>
@@ -509,13 +496,24 @@ function MismatchTable({ items }: { items: Mismatch[] }) {
   );
 }
 
+function NoticeBox({ tone, title, lines }: { tone: "warning" | "error"; title: string; lines: string[] }) {
+  return (
+    <div className={`notice-box ${tone}`}>
+      <AlertCircle size={18} />
+      <div>
+        <strong>{title}</strong>
+        {lines.map((line, index) => <p key={index}>{line}</p>)}
+      </div>
+    </div>
+  );
+}
+
 function CheckPage({
   templates,
   settings,
   busy,
   setBusy,
   addLog,
-  addHistory,
   onResult,
 }: {
   templates: CheckTemplate[];
@@ -523,7 +521,6 @@ function CheckPage({
   busy: BusyState;
   setBusy: (state: BusyState) => void;
   addLog: (text: string) => void;
-  addHistory: (item: HistoryItem) => void;
   onResult: (result: CheckResult) => void;
 }) {
   const [tableA, setTableA] = useLocalState("check.tableA", "");
@@ -532,6 +529,7 @@ function CheckPage({
   const [templateName, setTemplateName] = useLocalState("check.template", "默认模板");
   const [autoOpen, setAutoOpen] = useLocalState("check.autoOpen", settings.autoOpenResult);
   const [result, setResult] = useState<CheckResult | null>(null);
+  const [notice, setNotice] = useState<{ tone: "warning" | "error"; title: string; lines: string[] } | null>(null);
   const selectedTemplate = templates.find((item) => item.name === templateName) || templates[0] || DEFAULT_TEMPLATE;
 
   async function run() {
@@ -540,6 +538,7 @@ function CheckPage({
       return;
     }
     setBusy("checking");
+    setNotice(null);
     try {
       addLog(`开始核对: ${fileName(tableA)}`);
       const data = await backend<CheckResult>("check", {
@@ -550,22 +549,23 @@ function CheckPage({
       });
       setResult(data);
       onResult(data);
-      addHistory({
-        id: crypto.randomUUID(),
-        time: nowText(),
-        type: "工资表核对",
-        source: tableA,
-        template: selectedTemplate.name,
-        outputPath: data.output_path,
-        reportPath: data.report_path,
-        status: data.warnings.length ? "有警告" : "成功",
-        mismatchCount: data.mismatch_count,
-        mismatches: data.mismatches,
-      });
       addLog(`核对完成: ${data.mismatch_count} 个不一致`);
-      if (autoOpen) await openPath(data.output_path);
+      if (data.warnings.length) {
+        setNotice({ tone: "warning", title: "核对完成，但有警告", lines: data.warnings });
+      }
+      if (autoOpen) {
+        try {
+          await openPath(data.output_path);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          setNotice({ tone: "warning", title: "结果已生成，但自动打开失败", lines: [message] });
+          addLog(`自动打开失败: ${message}`);
+        }
+      }
     } catch (error) {
-      addLog(error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      setNotice({ tone: "error", title: "核对失败", lines: message.split("\n").filter(Boolean) });
+      addLog(message);
     } finally {
       setBusy("idle");
     }
@@ -606,6 +606,8 @@ function CheckPage({
         </div>
       </div>
 
+      {notice ? <NoticeBox tone={notice.tone} title={notice.title} lines={notice.lines} /> : null}
+
       <div className="section-head">
         <h2>模板规则预览</h2>
         <span>{selectedTemplate.rules.length} 条规则</span>
@@ -630,14 +632,12 @@ function GeneratePage({
   busy,
   setBusy,
   addLog,
-  addHistory,
   onResult,
 }: {
   settings: AppSettings;
   busy: BusyState;
   setBusy: (state: BusyState) => void;
   addLog: (text: string) => void;
-  addHistory: (item: HistoryItem) => void;
   onResult: (result: GenerateResult) => void;
 }) {
   const [tableC, setTableC] = useLocalState("generate.tableC", "");
@@ -702,17 +702,6 @@ function GeneratePage({
         normal_hours: normalHours,
       });
       onResult(data);
-      addHistory({
-        id: crypto.randomUUID(),
-        time: nowText(),
-        type: "生成考勤表",
-        source: tableC,
-        template: fileName(templateB),
-        outputPath: data.output_dir,
-        reportPath: data.report_path,
-        status: "成功",
-        generatedCount: data.generated_count,
-      });
       addLog(`生成完成: ${data.generated_count} 份`);
     } catch (error) {
       addLog(error instanceof Error ? error.message : String(error));
@@ -941,75 +930,12 @@ function TemplatesPage({
   );
 }
 
-function HistoryPage({
-  history,
-  selectedId,
-  setSelectedId,
-  clearHistory,
-}: {
-  history: HistoryItem[];
-  selectedId: string;
-  setSelectedId: (id: string) => void;
-  clearHistory: () => void;
-}) {
-  const selected = history.find((item) => item.id === selectedId) || history[0];
-  return (
-    <section className="workspace">
-      <PageHeader title="历史记录" subtitle="查看最近核对与生成任务，快速打开结果文件。" actions={<button className="secondary-button" onClick={clearHistory}><Trash2 size={16} />清理记录</button>} />
-      <div className="filters-row">
-        <select><option>全部任务</option><option>工资表核对</option><option>生成考勤表</option></select>
-        <select><option>本周</option><option>本月</option><option>全部</option></select>
-        <div className="search-input"><Search size={15} /><input placeholder="搜索文件名/模板" /></div>
-      </div>
-      <div className="history-layout">
-        <div className="data-table">
-          <table>
-            <thead>
-              <tr><th>时间</th><th>类型</th><th>源文件</th><th>模板</th><th>状态</th><th>操作</th></tr>
-            </thead>
-            <tbody>
-              {history.map((item) => (
-                <tr className={selected?.id === item.id ? "selected-row" : ""} key={item.id} onClick={() => setSelectedId(item.id)}>
-                  <td>{item.time}</td><td>{item.type}</td><td>{fileName(item.source)}</td><td>{item.template}</td><td><span className="status-pill">{item.status}</span></td>
-                  <td><button className="table-icon" onClick={() => openPath(item.outputPath)}><ExternalLink size={14} /></button></td>
-                </tr>
-              ))}
-              {!history.length ? <tr><td colSpan={6}>暂无历史记录</td></tr> : null}
-            </tbody>
-          </table>
-        </div>
-        <div className="history-detail">
-          <h2>{selected ? selected.type : "未选择任务"}</h2>
-          <p>{selected ? shortPath(selected.outputPath) : "完成任务后会在这里显示详情。"}</p>
-          {selected ? (
-            <>
-              <div className="metric-list compact">
-                <div><span>结果</span><strong>{selected.mismatchCount !== undefined ? `${selected.mismatchCount} 个不一致` : `${selected.generatedCount || 0} 份`}</strong></div>
-                <div><span>模板</span><strong>{selected.template}</strong></div>
-                <div><span>状态</span><strong>{selected.status}</strong></div>
-              </div>
-              <div className="action-stack">
-                <button onClick={() => openPath(selected.outputPath)}><ExternalLink size={16} />打开结果</button>
-                <button onClick={() => openPath(selected.reportPath)}><FileCheck2 size={16} />打开报告</button>
-                <button onClick={() => revealPath(selected.outputPath)}><FolderOpen size={16} />定位文件</button>
-              </div>
-              <MismatchTable items={selected.mismatches || []} />
-            </>
-          ) : null}
-        </div>
-      </div>
-    </section>
-  );
-}
-
 export default function App() {
   const [page, setPage] = useState<Page>("check");
   const [busy, setBusy] = useState<BusyState>("idle");
   const [templates, setTemplates] = useState<CheckTemplate[]>([DEFAULT_TEMPLATE]);
   const [log, setLog] = useState<string[]>([]);
-  const [history, setHistory] = useLocalState<HistoryItem[]>("task.history", []);
   const [settings] = useLocalState<AppSettings>("app.settings", DEFAULT_SETTINGS);
-  const [selectedHistoryId, setSelectedHistoryId] = useState("");
   const [checkResult, setCheckResult] = useState<CheckResult | null>(null);
   const [generateResult, setGenerateResult] = useState<GenerateResult | null>(null);
 
@@ -1020,23 +946,16 @@ export default function App() {
   }, []);
 
   const selectedTemplate = templates[0] || DEFAULT_TEMPLATE;
-  const selectedHistory = useMemo(() => history.find((item) => item.id === selectedHistoryId) || history[0] || null, [history, selectedHistoryId]);
 
   function addLog(text: string) {
     const time = new Date().toLocaleTimeString();
     setLog((items) => [...items, `${time}  ${text}`]);
   }
 
-  function addHistory(item: HistoryItem) {
-    setHistory([item, ...history].slice(0, 80));
-    setSelectedHistoryId(item.id);
-  }
-
   const nav = [
     { id: "check" as Page, label: "工资表核对", icon: FileCheck2 },
     { id: "generate" as Page, label: "生成考勤表", icon: Archive },
     { id: "templates" as Page, label: "核对模板", icon: LayoutTemplate },
-    { id: "history" as Page, label: "历史记录", icon: History },
   ];
 
   return (
@@ -1058,13 +977,12 @@ export default function App() {
         </aside>
 
         <div className="content-area">
-          {page === "check" && <CheckPage templates={templates} settings={settings} busy={busy} setBusy={setBusy} addLog={addLog} addHistory={addHistory} onResult={(result) => { setCheckResult(result); setGenerateResult(null); }} />}
-          {page === "generate" && <GeneratePage settings={settings} busy={busy} setBusy={setBusy} addLog={addLog} addHistory={addHistory} onResult={(result) => { setGenerateResult(result); setCheckResult(null); }} />}
+          {page === "check" && <CheckPage templates={templates} settings={settings} busy={busy} setBusy={setBusy} addLog={addLog} onResult={(result) => { setCheckResult(result); setGenerateResult(null); }} />}
+          {page === "generate" && <GeneratePage settings={settings} busy={busy} setBusy={setBusy} addLog={addLog} onResult={(result) => { setGenerateResult(result); setCheckResult(null); }} />}
           {page === "templates" && <TemplatesPage templates={templates} setTemplates={setTemplates} addLog={addLog} />}
-          {page === "history" && <HistoryPage history={history} selectedId={selectedHistoryId} setSelectedId={setSelectedHistoryId} clearHistory={() => { setHistory([]); setSelectedHistoryId(""); }} />}
         </div>
 
-        <DetailPanel page={page} busy={busy} selectedTemplate={selectedTemplate} checkResult={checkResult} generateResult={generateResult} selectedHistory={selectedHistory} log={log} />
+        <DetailPanel page={page} busy={busy} selectedTemplate={selectedTemplate} checkResult={checkResult} generateResult={generateResult} addLog={addLog} log={log} />
       </main>
     </div>
   );

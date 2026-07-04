@@ -834,6 +834,7 @@ def run_check(
     table_bs_folder: Path,
     output_path: Optional[Path] = None,
     template_name: Optional[str] = None,
+    progress: Optional[Callable[[int, int, str], None]] = None,
 ) -> Tuple[Path, Path, List[Mismatch], List[str]]:
     if table_a_path.suffix.lower() not in {".xlsx", ".xlsm"}:
         raise WorkbookError("主表只支持 .xlsx 或 .xlsm")
@@ -858,9 +859,12 @@ def run_check(
 
     mismatches: List[Mismatch] = []
     workbook_cache: Dict[Path, WorkbookSheet] = {}
+    total_offsets = len(data_offsets)
 
-    for offset in data_offsets:
+    for index, offset in enumerate(data_offsets, start=1):
         display_row_num = check_template.start_row + offset
+        if progress:
+            progress(index, total_offsets, f"核对第 {display_row_num} 行")
         row_number_raw = table_a_sheet.get_value(f"{check_template.number_column}{display_row_num}")
         if row_number_raw is None or str(row_number_raw).strip() == "":
             continue

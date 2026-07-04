@@ -2,9 +2,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::env;
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use tauri::Manager;
 
 #[cfg(target_os = "windows")]
@@ -36,6 +38,18 @@ struct BackendCommand {
     program: PathBuf,
     args: Vec<String>,
 }
+
+struct BackendProcess {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
+
+struct BackendState {
+    process: Mutex<Option<BackendProcess>>,
+}
+
+static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 fn executable_name(base: &str) -> String {
     if cfg!(target_os = "windows") {
@@ -148,43 +162,83 @@ fn backend_command(app: &tauri::AppHandle) -> Result<BackendCommand, String> {
 }
 
 #[tauri::command]
-async fn run_backend(app: tauri::AppHandle, action: String, payload: Value) -> Result<BackendEnvelope, String> {
-    let backend = backend_command(&app)?;
-    let request = json!({ "action": action, "payload": payload }).to_string();
+async fn run_backend(app: tauri::AppHandle, state: tauri::State<'_, BackendState>, action: String, payload: Value) -> Result<BackendEnvelope, String> {
+    let mut guard = state
+        .process
+        .lock()
+        .map_err(|_| "后端状态锁定失败".to_string())?;
+    match run_backend_persistent(&app, &mut guard, &action, payload.clone()) {
+        Ok(envelope) => Ok(envelope),
+        Err(first_error) => {
+            if let Some(mut process) = guard.take() {
+                let _ = process.child.kill();
+                let _ = process.child.wait();
+            }
+            run_backend_persistent(&app, &mut guard, &action, payload)
+                .map_err(|second_error| format!("{second_error}\n首次尝试失败: {first_error}"))
+        }
+    }
+}
 
+fn spawn_backend_process(app: &tauri::AppHandle) -> Result<BackendProcess, String> {
+    let backend = backend_command(app)?;
     let mut command = Command::new(&backend.program);
+    let mut args = backend.args.clone();
+    args.push("--serve".to_string());
     command
-        .args(&backend.args)
+        .args(&args)
         .env("PYTHONUTF8", "1")
         .env("PYTHONIOENCODING", "utf-8")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::null());
     let mut child = hide_console_window(&mut command)
         .spawn()
         .map_err(|err| format!("启动后端失败: {err}"))?;
+    let stdin = child.stdin.take().ok_or_else(|| "后端 stdin 初始化失败".to_string())?;
+    let stdout = child.stdout.take().ok_or_else(|| "后端 stdout 初始化失败".to_string())?;
+    Ok(BackendProcess {
+        child,
+        stdin,
+        stdout: BufReader::new(stdout),
+    })
+}
 
-    if let Some(stdin) = child.stdin.as_mut() {
-        stdin
-            .write_all(request.as_bytes())
-            .map_err(|err| format!("写入后端参数失败: {err}"))?;
+fn run_backend_persistent(
+    app: &tauri::AppHandle,
+    process_slot: &mut Option<BackendProcess>,
+    action: &str,
+    payload: Value,
+) -> Result<BackendEnvelope, String> {
+    if process_slot.is_none() {
+        *process_slot = Some(spawn_backend_process(app)?);
     }
+    let process = process_slot.as_mut().ok_or_else(|| "后端进程未启动".to_string())?;
+    let id = REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    let request = json!({ "id": id, "action": action, "payload": payload }).to_string();
+    process
+        .stdin
+        .write_all(request.as_bytes())
+        .map_err(|err| format!("写入后端参数失败: {err}"))?;
+    process
+        .stdin
+        .write_all(b"\n")
+        .map_err(|err| format!("写入后端参数失败: {err}"))?;
+    process
+        .stdin
+        .flush()
+        .map_err(|err| format!("刷新后端参数失败: {err}"))?;
 
-    let output = child
-        .wait_with_output()
+    let mut line = String::new();
+    process
+        .stdout
+        .read_line(&mut line)
         .map_err(|err| format!("读取后端结果失败: {err}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    let mut envelope: BackendEnvelope = serde_json::from_str(stdout.trim())
-        .map_err(|err| format!("后端返回格式无效: {err}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"))?;
-    if !output.status.success() && envelope.ok {
-        envelope.ok = false;
-        envelope.errors.push(format!("后端退出码异常: {}", output.status));
+    if line.trim().is_empty() {
+        return Err("后端没有返回结果".to_string());
     }
-    if !stderr.trim().is_empty() {
-        envelope.warnings.push(stderr.trim().to_string());
-    }
+    let envelope: BackendEnvelope = serde_json::from_str(line.trim())
+        .map_err(|err| format!("后端返回格式无效: {err}\nSTDOUT:\n{line}"))?;
     Ok(envelope)
 }
 
@@ -193,7 +247,7 @@ async fn reveal_path(path: String) -> Result<(), String> {
     let target = PathBuf::from(path);
     let command_result = if cfg!(target_os = "windows") {
         let mut command = Command::new("explorer");
-        command.arg("/select,").arg(target);
+        command.arg(format!("/select,{}", target.to_string_lossy()));
         hide_console_window(&mut command).status()
     } else if cfg!(target_os = "macos") {
         Command::new("open").arg("-R").arg(target).status()
@@ -205,23 +259,33 @@ async fn reveal_path(path: String) -> Result<(), String> {
         };
         Command::new("xdg-open").arg(folder).status()
     };
-    command_result.map_err(|err| format!("打开所在位置失败: {err}"))?;
+    let status = command_result.map_err(|err| format!("打开所在位置失败: {err}"))?;
+    if !status.success() {
+        return Err(format!("打开所在位置失败: {status}"));
+    }
     Ok(())
 }
 
 #[tauri::command]
 async fn open_path(path: String) -> Result<(), String> {
     let target = PathBuf::from(&path);
+    if !target.exists() {
+        return Err(format!("路径不存在: {path}"));
+    }
     let command_result = if cfg!(target_os = "windows") {
-        let mut command = Command::new("cmd");
-        command.args(["/C", "start", "", &path]);
+        let mut command = Command::new("powershell");
+        command.args(["-NoProfile", "-Command", "Start-Process -LiteralPath $args[0]"]);
+        command.arg(&path);
         hide_console_window(&mut command).status()
     } else if cfg!(target_os = "macos") {
         Command::new("open").arg(target).status()
     } else {
         Command::new("xdg-open").arg(target).status()
     };
-    command_result.map_err(|err| format!("打开文件失败: {err}"))?;
+    let status = command_result.map_err(|err| format!("打开文件失败: {err}"))?;
+    if !status.success() {
+        return Err(format!("打开文件失败: {status}"));
+    }
     Ok(())
 }
 
@@ -232,6 +296,9 @@ async fn read_text_file(path: String) -> Result<String, String> {
 
 pub fn run() {
     tauri::Builder::default()
+        .manage(BackendState {
+            process: Mutex::new(None),
+        })
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![run_backend, reveal_path, open_path, read_text_file])
         .run(tauri::generate_context!())

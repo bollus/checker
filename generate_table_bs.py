@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 import xml.etree.ElementTree as ET
 
 from excel_check_tool import (
@@ -1244,6 +1244,7 @@ def run_generate(
     afternoon_start: str = DEFAULT_AFTERNOON_START,
     afternoon_end: str = DEFAULT_AFTERNOON_END,
     normal_hours: str | int | Decimal = DEFAULT_NORMAL_HOURS,
+    progress: Optional[Callable[[int, int, str], None]] = None,
 ) -> Tuple[Path, List[Path], Path]:
     signature_scale = validate_signature_scale(signature_scale)
     schedule = build_work_schedule(morning_start, morning_end, afternoon_start, afternoon_end, normal_hours)
@@ -1255,7 +1256,10 @@ def run_generate(
         _, _, day_headers, employees = read_payroll_summary(table_c_path, template_b_path, schedule)
     output = output_dir or next_output_dir(table_c_path)
     generated_files: List[Path] = []
-    for employee in employees:
+    total_employees = len(employees)
+    for index, employee in enumerate(employees, start=1):
+        if progress:
+            progress(index, total_employees, f"生成 {employee.no}.{employee.name}")
         generated_files.append(
             write_employee_workbook(
                 template_b_path,

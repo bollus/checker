@@ -135,12 +135,18 @@ def mismatch_to_dict(item: check_tool.Mismatch) -> Dict[str, Any]:
 
 def action_check(payload: Dict[str, Any]) -> Dict[str, Any]:
     template = load_template_from_payload(payload)
+    progress_state: Dict[str, Any] = {"current": 0, "total": 0, "message": ""}
+
+    def progress(current: int, total: int, message: str) -> None:
+        progress_state.update({"current": current, "total": total, "message": message})
+
     with using_template(template):
         output, report, mismatches, warnings = check_tool.run_check(
             table_a_path=Path(payload["table_a_path"]),
             table_bs_folder=Path(payload["table_bs_folder"]),
             output_path=Path(payload["output_path"]) if payload.get("output_path") else None,
             template_name=payload.get("template_name"),
+            progress=progress,
         )
     return ok(
         {
@@ -149,11 +155,17 @@ def action_check(payload: Dict[str, Any]) -> Dict[str, Any]:
             "mismatch_count": len(mismatches),
             "mismatches": [mismatch_to_dict(item) for item in mismatches],
             "warnings": list(warnings),
+            "progress": progress_state,
         }
     )
 
 
 def action_generate(payload: Dict[str, Any]) -> Dict[str, Any]:
+    progress_state: Dict[str, Any] = {"current": 0, "total": 0, "message": ""}
+
+    def progress(current: int, total: int, message: str) -> None:
+        progress_state.update({"current": current, "total": total, "message": message})
+
     output_dir, files, report = generator.run_generate(
         table_c_path=Path(payload["table_c_path"]),
         template_b_path=Path(payload["template_b_path"]),
@@ -165,6 +177,7 @@ def action_generate(payload: Dict[str, Any]) -> Dict[str, Any]:
         afternoon_start=str(payload.get("afternoon_start", generator.DEFAULT_AFTERNOON_START)),
         afternoon_end=str(payload.get("afternoon_end", generator.DEFAULT_AFTERNOON_END)),
         normal_hours=str(payload.get("normal_hours", generator.DEFAULT_NORMAL_HOURS)),
+        progress=progress,
     )
     return ok(
         {
@@ -172,6 +185,7 @@ def action_generate(payload: Dict[str, Any]) -> Dict[str, Any]:
             "report_path": str(report),
             "generated_count": len(files),
             "generated_files": [str(path) for path in files],
+            "progress": progress_state,
         }
     )
 
@@ -401,5 +415,44 @@ def main() -> int:
     return 0 if response.get("ok") else 1
 
 
+def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        action = str(request.get("action", "")).strip()
+        payload = request.get("payload") or {}
+        if action not in ACTIONS:
+            raise check_tool.WorkbookError(f"未知任务: {action}")
+        response = ACTIONS[action](payload)
+    except BaseException as exc:
+        response = fail(exc)
+    if "id" in request:
+        response["id"] = request["id"]
+    return response
+
+
+def serve() -> int:
+    for raw_line in sys.stdin.buffer:
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        try:
+            text = raw_line.decode("utf-8")
+            try:
+                request = json.loads(text)
+            except json.JSONDecodeError as exc:
+                if "Invalid \\escape" not in exc.msg:
+                    raise
+                request = json.loads(escape_invalid_json_backslashes(text))
+            if not isinstance(request, dict):
+                raise check_tool.WorkbookError("任务参数必须是 JSON 对象")
+            response = handle_request(request)
+        except BaseException as exc:
+            response = fail(exc)
+        sys.stdout.buffer.write(json.dumps(response, ensure_ascii=False, default=json_default).encode("utf-8") + b"\n")
+        sys.stdout.buffer.flush()
+    return 0
+
+
 if __name__ == "__main__":
+    if "--serve" in sys.argv:
+        raise SystemExit(serve())
     raise SystemExit(main())

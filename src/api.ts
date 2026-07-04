@@ -39,6 +39,7 @@ export interface CheckResult {
   mismatch_count: number;
   mismatches: Mismatch[];
   warnings: string[];
+  progress?: ProgressSnapshot;
 }
 
 export interface GenerateResult {
@@ -46,6 +47,13 @@ export interface GenerateResult {
   report_path: string;
   generated_count: number;
   generated_files: string[];
+  progress?: ProgressSnapshot;
+}
+
+export interface ProgressSnapshot {
+  current: number;
+  total: number;
+  message: string;
 }
 
 export interface WorkbookCell {
