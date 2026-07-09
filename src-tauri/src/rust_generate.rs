@@ -16,6 +16,7 @@ const DEFAULT_AFTERNOON_END: &str = "18:00";
 const DEFAULT_NORMAL_HOURS: f64 = 10.0;
 const SIGNATURE_MEDIA_WIDTH: usize = 900;
 const SIGNATURE_MEDIA_HEIGHT: usize = 260;
+const EMU_PER_PIXEL: i32 = 9_525;
 const REL_NS: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
 const DRAWING_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
 const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
@@ -154,6 +155,33 @@ struct OvertimeEntry {
 
 struct ManagerSignatureIndex {
     files: HashMap<String, PathBuf>,
+}
+
+#[derive(Clone, Copy)]
+enum SignaturePlacement {
+    Stretch,
+    Contain,
+}
+
+#[derive(Clone, Copy)]
+struct AnchorMarker {
+    col: i32,
+    row: i32,
+    col_off: i32,
+    row_off: i32,
+}
+
+#[derive(Clone, Copy)]
+struct AnchorBounds {
+    from: AnchorMarker,
+    to: AnchorMarker,
+}
+
+struct SheetMetrics {
+    default_col_width: f64,
+    default_row_height: f64,
+    col_widths: Vec<(i32, i32, f64)>,
+    row_heights: HashMap<i32, f64>,
 }
 
 #[derive(Default)]
@@ -758,6 +786,7 @@ fn write_employee(
         &signature_png,
         "xl/media/generated_signature.png",
         "Generated Employee Signature",
+        SignaturePlacement::Contain,
         (0, 41, 6, 43),
         (1, 41, 3, 43),
     )?;
@@ -765,16 +794,31 @@ fn write_employee(
         if let Some(signature_path) = manager_signatures.find(&employee.name) {
             let extension = image_extension(signature_path).ok_or_else(|| format!("管理层签名图片格式不支持: {}", signature_path.display()))?;
             let image_bytes = fs::read(signature_path).map_err(|err| format!("读取管理层签名图片失败 {}: {err}", signature_path.display()))?;
+            let media_path = format!("xl/media/generated_manager_signature.{extension}");
             apply_signature(
                 template_book,
                 &mut replacements,
                 main_template,
                 &image_bytes,
-                &format!("xl/media/generated_manager_signature.{extension}"),
+                &media_path,
                 "Generated Manager Signature",
+                SignaturePlacement::Contain,
                 (7, 41, 12, 43),
                 (7, 41, 12, 43),
             )?;
+            if let Some(overtime_sheet) = overtime {
+                apply_signature(
+                    template_book,
+                    &mut replacements,
+                    overtime_sheet,
+                    &image_bytes,
+                    &media_path,
+                    "Generated Manager Signature",
+                    SignaturePlacement::Contain,
+                    (5, 56, 9, 58),
+                    (5, 56, 9, 58),
+                )?;
+            }
         } else {
             warnings.push(format!("未找到管理层签名图片: {}", employee.name));
         }
@@ -787,6 +831,7 @@ fn write_employee(
             &signature_png,
             "xl/media/generated_signature.png",
             "Generated Employee Signature",
+            SignaturePlacement::Stretch,
             (4, 52, 9, 52),
             (7, 51, 8, 53),
         )?;
@@ -1036,6 +1081,7 @@ fn apply_signature(
     signature_png: &[u8],
     media_path: &str,
     picture_name: &str,
+    placement: SignaturePlacement,
     target_range: (i32, i32, i32, i32),
     fallback_anchor: (i32, i32, i32, i32),
 ) -> Result<(), String> {
@@ -1060,8 +1106,193 @@ fn apply_signature(
         .or_else(|| book.entries.get(&drawing_part))
         .cloned()
         .unwrap_or_else(empty_drawing);
-    replacements.insert(drawing_part, rewrite_drawing_with_signature(&drawing_raw, &rel_id, picture_name, target_range, fallback_anchor)?);
+    let anchor = match placement {
+        SignaturePlacement::Stretch => AnchorBounds::from_cells(fallback_anchor),
+        SignaturePlacement::Contain => fit_image_anchor(book, sheet_info, signature_png, &extension, fallback_anchor),
+    };
+    replacements.insert(drawing_part, rewrite_drawing_with_signature(&drawing_raw, &rel_id, picture_name, target_range, anchor)?);
     Ok(())
+}
+
+impl AnchorBounds {
+    fn from_cells(bounds: (i32, i32, i32, i32)) -> Self {
+        let (from_col, from_row, to_col, to_row) = bounds;
+        Self {
+            from: AnchorMarker { col: from_col, row: from_row, col_off: 0, row_off: 0 },
+            to: AnchorMarker { col: to_col, row: to_row, col_off: 0, row_off: 0 },
+        }
+    }
+}
+
+fn fit_image_anchor(book: &Workbook, sheet_info: &WorkbookSheet, image_bytes: &[u8], extension: &str, bounds: (i32, i32, i32, i32)) -> AnchorBounds {
+    let Some((image_width, image_height)) = image_dimensions(image_bytes, extension) else {
+        return AnchorBounds::from_cells(bounds);
+    };
+    if image_width == 0 || image_height == 0 {
+        return AnchorBounds::from_cells(bounds);
+    }
+    let Some(sheet_raw) = book.entries.get(&sheet_info.part_name) else {
+        return AnchorBounds::from_cells(bounds);
+    };
+    let metrics = parse_sheet_metrics(sheet_raw);
+    let (from_col, from_row, to_col, to_row) = bounds;
+    let target_width = metrics.range_width_pixels(from_col, to_col + 1);
+    let target_height = metrics.range_height_pixels(from_row, to_row + 1);
+    if target_width <= 0.0 || target_height <= 0.0 {
+        return AnchorBounds::from_cells(bounds);
+    }
+    let image_ratio = image_width as f64 / image_height as f64;
+    let target_ratio = target_width / target_height;
+    let (fit_width, fit_height) = if image_ratio > target_ratio {
+        (target_width * 0.92, target_width * 0.92 / image_ratio)
+    } else {
+        (target_height * 0.82 * image_ratio, target_height * 0.82)
+    };
+    let offset_x = ((target_width - fit_width) / 2.0).max(0.0);
+    let offset_y = ((target_height - fit_height) / 2.0).max(0.0);
+    AnchorBounds {
+        from: metrics.marker_from_offset(from_col, from_row, offset_x, offset_y),
+        to: metrics.marker_from_offset(from_col, from_row, offset_x + fit_width, offset_y + fit_height),
+    }
+}
+
+impl SheetMetrics {
+    fn col_width_pixels(&self, col: i32) -> f64 {
+        self.col_widths
+            .iter()
+            .find(|(min, max, _)| col >= *min && col <= *max)
+            .map(|(_, _, width)| excel_col_width_to_pixels(*width))
+            .unwrap_or_else(|| excel_col_width_to_pixels(self.default_col_width))
+    }
+
+    fn row_height_pixels(&self, row: i32) -> f64 {
+        self.row_heights.get(&row).copied().unwrap_or(self.default_row_height) * 4.0 / 3.0
+    }
+
+    fn range_width_pixels(&self, from_col: i32, to_col_exclusive: i32) -> f64 {
+        (from_col..to_col_exclusive).map(|col| self.col_width_pixels(col)).sum()
+    }
+
+    fn range_height_pixels(&self, from_row: i32, to_row_exclusive: i32) -> f64 {
+        (from_row..to_row_exclusive).map(|row| self.row_height_pixels(row)).sum()
+    }
+
+    fn marker_from_offset(&self, start_col: i32, start_row: i32, x_pixels: f64, y_pixels: f64) -> AnchorMarker {
+        let (col, col_off) = marker_axis_from_offset(start_col, x_pixels, |index| self.col_width_pixels(index));
+        let (row, row_off) = marker_axis_from_offset(start_row, y_pixels, |index| self.row_height_pixels(index));
+        AnchorMarker { col, row, col_off, row_off }
+    }
+}
+
+fn marker_axis_from_offset(mut index: i32, mut offset_pixels: f64, size_at: impl Fn(i32) -> f64) -> (i32, i32) {
+    while offset_pixels > 0.0 {
+        let size = size_at(index).max(1.0);
+        if offset_pixels <= size {
+            return (index, (offset_pixels * EMU_PER_PIXEL as f64).round() as i32);
+        }
+        offset_pixels -= size;
+        index += 1;
+    }
+    (index, 0)
+}
+
+fn excel_col_width_to_pixels(width: f64) -> f64 {
+    (width * 7.0 + 5.0).floor().max(1.0)
+}
+
+fn parse_sheet_metrics(raw: &[u8]) -> SheetMetrics {
+    let mut metrics = SheetMetrics {
+        default_col_width: 8.43,
+        default_row_height: 15.0,
+        col_widths: Vec::new(),
+        row_heights: HashMap::new(),
+    };
+    let mut reader = Reader::from_reader(Cursor::new(raw));
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Empty(event)) | Ok(Event::Start(event)) if local_name(event.name().as_ref()) == b"sheetFormatPr" => {
+                if let Some(value) = xml_attr(&reader, &event, b"defaultColWidth").and_then(|item| item.parse::<f64>().ok()) {
+                    metrics.default_col_width = value;
+                }
+                if let Some(value) = xml_attr(&reader, &event, b"defaultRowHeight").and_then(|item| item.parse::<f64>().ok()) {
+                    metrics.default_row_height = value;
+                }
+            }
+            Ok(Event::Empty(event)) | Ok(Event::Start(event)) if local_name(event.name().as_ref()) == b"col" => {
+                let min = xml_attr(&reader, &event, b"min").and_then(|item| item.parse::<i32>().ok()).unwrap_or(1) - 1;
+                let max = xml_attr(&reader, &event, b"max").and_then(|item| item.parse::<i32>().ok()).unwrap_or(min + 1) - 1;
+                if let Some(width) = xml_attr(&reader, &event, b"width").and_then(|item| item.parse::<f64>().ok()) {
+                    metrics.col_widths.push((min, max, width));
+                }
+            }
+            Ok(Event::Empty(event)) | Ok(Event::Start(event)) if local_name(event.name().as_ref()) == b"row" => {
+                if let (Some(row), Some(height)) = (
+                    xml_attr(&reader, &event, b"r").and_then(|item| item.parse::<i32>().ok()),
+                    xml_attr(&reader, &event, b"ht").and_then(|item| item.parse::<f64>().ok()),
+                ) {
+                    metrics.row_heights.insert(row - 1, height);
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    metrics
+}
+
+fn image_dimensions(bytes: &[u8], extension: &str) -> Option<(u32, u32)> {
+    match extension.to_ascii_lowercase().as_str() {
+        "png" => png_dimensions(bytes),
+        "jpg" | "jpeg" => jpeg_dimensions(bytes),
+        _ => None,
+    }
+}
+
+fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 24 || &bytes[0..8] != b"\x89PNG\r\n\x1a\n" {
+        return None;
+    }
+    Some((
+        u32::from_be_bytes(bytes[16..20].try_into().ok()?),
+        u32::from_be_bytes(bytes[20..24].try_into().ok()?),
+    ))
+}
+
+fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
+        return None;
+    }
+    let mut index = 2usize;
+    while index + 9 < bytes.len() {
+        while index < bytes.len() && bytes[index] == 0xFF {
+            index += 1;
+        }
+        if index >= bytes.len() {
+            return None;
+        }
+        let marker = bytes[index];
+        index += 1;
+        if marker == 0xD9 || marker == 0xDA {
+            return None;
+        }
+        if index + 2 > bytes.len() {
+            return None;
+        }
+        let length = u16::from_be_bytes([bytes[index], bytes[index + 1]]) as usize;
+        if length < 2 || index + length > bytes.len() {
+            return None;
+        }
+        if matches!(marker, 0xC0 | 0xC1 | 0xC2 | 0xC3 | 0xC5 | 0xC6 | 0xC7 | 0xC9 | 0xCA | 0xCB | 0xCD | 0xCE | 0xCF) && length >= 7 {
+            let height = u16::from_be_bytes([bytes[index + 3], bytes[index + 4]]) as u32;
+            let width = u16::from_be_bytes([bytes[index + 5], bytes[index + 6]]) as u32;
+            return Some((width, height));
+        }
+        index += length;
+    }
+    None
 }
 
 fn ensure_image_content_type(book: &Workbook, replacements: &mut HashMap<String, Vec<u8>>, extension: &str, content_type: &str) -> Result<(), String> {
@@ -1293,7 +1524,7 @@ struct AnchorState {
     bytes: Vec<u8>,
 }
 
-fn rewrite_drawing_with_signature(raw: &[u8], rel_id: &str, picture_name: &str, target_range: (i32, i32, i32, i32), fallback_anchor: (i32, i32, i32, i32)) -> Result<Vec<u8>, String> {
+fn rewrite_drawing_with_signature(raw: &[u8], rel_id: &str, picture_name: &str, target_range: (i32, i32, i32, i32), fallback_anchor: AnchorBounds) -> Result<Vec<u8>, String> {
     let mut reader = Reader::from_reader(Cursor::new(raw));
     let mut writer = Writer::new(Vec::new());
     let mut buf = Vec::new();
@@ -1399,15 +1630,22 @@ fn anchor_overlaps(state: &AnchorState, target: (i32, i32, i32, i32)) -> bool {
     from_col <= max_col && to_col >= min_col && from_row <= max_row && to_row >= min_row
 }
 
-fn signature_anchor_xml(rel_id: &str, picture_name: &str, bounds: (i32, i32, i32, i32)) -> Vec<u8> {
-    let (from_col, from_row, to_col, to_row) = bounds;
+fn signature_anchor_xml(rel_id: &str, picture_name: &str, bounds: AnchorBounds) -> Vec<u8> {
+    let from_col = bounds.from.col;
+    let from_row = bounds.from.row;
+    let from_col_off = bounds.from.col_off;
+    let from_row_off = bounds.from.row_off;
+    let to_col = bounds.to.col;
+    let to_row = bounds.to.row;
+    let to_col_off = bounds.to.col_off;
+    let to_row_off = bounds.to.row_off;
     let picture_id = rel_id
         .strip_prefix("rId")
         .and_then(|item| item.parse::<i32>().ok())
         .map(|number| 9000 + number)
         .unwrap_or(9001);
     format!(
-        r#"<xdr:twoCellAnchor editAs="oneCell"><xdr:from><xdr:col>{from_col}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{from_row}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>{to_col}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{to_row}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:pic><xdr:nvPicPr><xdr:cNvPr id="{picture_id}" name="{picture_name}"/><xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr><xdr:blipFill><a:blip r:embed="{rel_id}"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic><xdr:clientData/></xdr:twoCellAnchor>"#
+        r#"<xdr:twoCellAnchor editAs="oneCell"><xdr:from><xdr:col>{from_col}</xdr:col><xdr:colOff>{from_col_off}</xdr:colOff><xdr:row>{from_row}</xdr:row><xdr:rowOff>{from_row_off}</xdr:rowOff></xdr:from><xdr:to><xdr:col>{to_col}</xdr:col><xdr:colOff>{to_col_off}</xdr:colOff><xdr:row>{to_row}</xdr:row><xdr:rowOff>{to_row_off}</xdr:rowOff></xdr:to><xdr:pic><xdr:nvPicPr><xdr:cNvPr id="{picture_id}" name="{picture_name}"/><xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr><xdr:blipFill><a:blip r:embed="{rel_id}"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic><xdr:clientData/></xdr:twoCellAnchor>"#
     )
     .into_bytes()
 }
@@ -2101,7 +2339,7 @@ mod tests {
             .filter(|(name, _)| name.starts_with("xl/drawings/drawing") && name.ends_with(".xml"))
             .filter(|(_, data)| String::from_utf8_lossy(data).contains("Generated Manager Signature"))
             .count();
-        assert!(generated_manager_signature_refs >= 1);
+        assert!(generated_manager_signature_refs >= 2);
         let _ = fs::remove_dir_all(output);
         let _ = fs::remove_dir_all(manager_dir);
     }
