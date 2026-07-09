@@ -1,6 +1,6 @@
 [package]
 name = "excel-check-tool"
-version = "0.2.0"
+version = "0.3.1"
 description = "Excel payroll checking and attendance generator"
 authors = ["Ray"]
 edition = "2021"

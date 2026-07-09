@@ -42,6 +42,10 @@ pub struct GeneratePayload {
     pub normal_hours: String,
     #[serde(default)]
     pub signature_font_path: Option<String>,
+    #[serde(default)]
+    pub insert_manager_signature: bool,
+    #[serde(default)]
+    pub manager_signature_dir: Option<String>,
 }
 
 fn default_signature_scale() -> i32 { 100 }
@@ -148,6 +152,10 @@ struct OvertimeEntry {
     holiday_hours: f64,
 }
 
+struct ManagerSignatureIndex {
+    files: HashMap<String, PathBuf>,
+}
+
 #[derive(Default)]
 struct DayFillResult {
     payable: bool,
@@ -170,6 +178,11 @@ pub fn run_generate(payload: GeneratePayload) -> Result<GenerateResult, String> 
         return Err("签名大小必须在 30% 到 200% 之间".to_string());
     }
     let signature_font_path = resolve_signature_font(payload.signature_font_path.as_deref())?;
+    let manager_signatures = if payload.insert_manager_signature {
+        Some(build_manager_signature_index(payload.manager_signature_dir.as_deref())?)
+    } else {
+        None
+    };
     let schedule = Schedule {
         morning_start: parse_time(&payload.morning_start)?,
         morning_end: parse_time(&payload.morning_end)?,
@@ -218,7 +231,21 @@ pub fn run_generate(payload: GeneratePayload) -> Result<GenerateResult, String> 
     for (index, employee) in employees.iter().enumerate() {
         progress.current = index + 1;
         progress.message = format!("生成 {}.{}", employee.no, employee.name);
-        let output = write_employee(&template_book, main_template, employee, &day_headers, month_start, &output_dir, &template_path, &schedule, payload.count_holidays, &signature_font_path, payload.signature_scale)?;
+        let output = write_employee(
+            &template_book,
+            main_template,
+            employee,
+            &day_headers,
+            month_start,
+            &output_dir,
+            &template_path,
+            &schedule,
+            payload.count_holidays,
+            &signature_font_path,
+            payload.signature_scale,
+            manager_signatures.as_ref(),
+            &mut warnings,
+        )?;
         generated_files.push(output);
     }
     let report_path = output_dir.join("生成说明.txt");
@@ -510,6 +537,8 @@ fn write_employee(
     count_holidays: bool,
     signature_font_path: &Path,
     signature_scale: i32,
+    manager_signatures: Option<&ManagerSignatureIndex>,
+    warnings: &mut Vec<String>,
 ) -> Result<PathBuf, String> {
     let mut replacements: HashMap<String, Vec<u8>> = HashMap::new();
     let overtime = choose_sheet(&template_book.sheets, "Overtime");
@@ -728,9 +757,28 @@ fn write_employee(
         main_template,
         &signature_png,
         "xl/media/generated_signature.png",
+        "Generated Employee Signature",
         (0, 41, 6, 43),
         (1, 41, 3, 43),
     )?;
+    if let Some(manager_signatures) = manager_signatures {
+        if let Some(signature_path) = manager_signatures.find(&employee.name) {
+            let extension = image_extension(signature_path).ok_or_else(|| format!("管理层签名图片格式不支持: {}", signature_path.display()))?;
+            let image_bytes = fs::read(signature_path).map_err(|err| format!("读取管理层签名图片失败 {}: {err}", signature_path.display()))?;
+            apply_signature(
+                template_book,
+                &mut replacements,
+                main_template,
+                &image_bytes,
+                &format!("xl/media/generated_manager_signature.{extension}"),
+                "Generated Manager Signature",
+                (7, 41, 12, 43),
+                (7, 41, 12, 43),
+            )?;
+        } else {
+            warnings.push(format!("未找到管理层签名图片: {}", employee.name));
+        }
+    }
     if let Some(overtime_sheet) = overtime {
         apply_signature(
             template_book,
@@ -738,6 +786,7 @@ fn write_employee(
             overtime_sheet,
             &signature_png,
             "xl/media/generated_signature.png",
+            "Generated Employee Signature",
             (4, 52, 9, 52),
             (7, 51, 8, 53),
         )?;
@@ -839,6 +888,56 @@ fn resolve_signature_font(path: Option<&str>) -> Result<PathBuf, String> {
     Err("缺少签名字体文件: Nothing_You_Could_Do/NothingYouCouldDo-Regular.ttf".to_string())
 }
 
+fn build_manager_signature_index(path: Option<&str>) -> Result<ManagerSignatureIndex, String> {
+    let path = path
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .ok_or_else(|| "已勾选插入管理层签名，请选择管理层签名图片目录".to_string())?;
+    let dir = PathBuf::from(path);
+    if !dir.is_dir() {
+        return Err(format!("管理层签名图片目录不存在: {}", dir.display()));
+    }
+    let mut files = HashMap::new();
+    for entry in fs::read_dir(&dir).map_err(|err| format!("读取管理层签名图片目录失败: {err}"))? {
+        let path = entry.map_err(|err| format!("读取管理层签名图片失败: {err}"))?.path();
+        if !path.is_file() || image_extension(&path).is_none() {
+            continue;
+        }
+        if let Some(stem) = path.file_stem().and_then(|item| item.to_str()) {
+            files.entry(normalize_name_key(stem)).or_insert(path);
+        }
+    }
+    if files.is_empty() {
+        return Err(format!("管理层签名图片目录中没有 PNG/JPG 图片: {}", dir.display()));
+    }
+    Ok(ManagerSignatureIndex { files })
+}
+
+impl ManagerSignatureIndex {
+    fn find(&self, employee_name: &str) -> Option<&PathBuf> {
+        self.files.get(&normalize_name_key(employee_name))
+    }
+}
+
+fn normalize_name_key(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase()
+}
+
+fn image_extension(path: &Path) -> Option<String> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "png" | "jpg" | "jpeg" => Some(extension),
+        _ => None,
+    }
+}
+
+fn image_content_type(extension: &str) -> &'static str {
+    match extension.to_ascii_lowercase().as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        _ => "image/png",
+    }
+}
+
 fn signature_text(employee_name: &str) -> String {
     employee_name
         .split_whitespace()
@@ -936,11 +1035,17 @@ fn apply_signature(
     sheet_info: &WorkbookSheet,
     signature_png: &[u8],
     media_path: &str,
+    picture_name: &str,
     target_range: (i32, i32, i32, i32),
     fallback_anchor: (i32, i32, i32, i32),
 ) -> Result<(), String> {
     replacements.insert(media_path.to_string(), signature_png.to_vec());
-    ensure_png_content_type(book, replacements)?;
+    let extension = Path::new(media_path)
+        .extension()
+        .and_then(|item| item.to_str())
+        .unwrap_or("png")
+        .to_ascii_lowercase();
+    ensure_image_content_type(book, replacements, &extension, image_content_type(&extension))?;
     let drawing_part = ensure_sheet_drawing_part(book, replacements, sheet_info)?;
     let rels_part = format!("{}/_rels/{}.rels", parent_path(&drawing_part), file_name(&drawing_part));
     let rels_raw = replacements
@@ -955,19 +1060,19 @@ fn apply_signature(
         .or_else(|| book.entries.get(&drawing_part))
         .cloned()
         .unwrap_or_else(empty_drawing);
-    replacements.insert(drawing_part, rewrite_drawing_with_signature(&drawing_raw, &rel_id, target_range, fallback_anchor)?);
+    replacements.insert(drawing_part, rewrite_drawing_with_signature(&drawing_raw, &rel_id, picture_name, target_range, fallback_anchor)?);
     Ok(())
 }
 
-fn ensure_png_content_type(book: &Workbook, replacements: &mut HashMap<String, Vec<u8>>) -> Result<(), String> {
+fn ensure_image_content_type(book: &Workbook, replacements: &mut HashMap<String, Vec<u8>>, extension: &str, content_type: &str) -> Result<(), String> {
     let raw = replacements
         .get("[Content_Types].xml")
         .or_else(|| book.entries.get("[Content_Types].xml"))
         .ok_or_else(|| "Excel 缺少 [Content_Types].xml".to_string())?;
-    if String::from_utf8_lossy(raw).to_ascii_lowercase().contains("extension=\"png\"") {
+    if String::from_utf8_lossy(raw).to_ascii_lowercase().contains(&format!("extension=\"{}\"", extension.to_ascii_lowercase())) {
         return Ok(());
     }
-    replacements.insert("[Content_Types].xml".to_string(), append_content_type_default(raw, "png", "image/png")?);
+    replacements.insert("[Content_Types].xml".to_string(), append_content_type_default(raw, extension, content_type)?);
     Ok(())
 }
 
@@ -1188,7 +1293,7 @@ struct AnchorState {
     bytes: Vec<u8>,
 }
 
-fn rewrite_drawing_with_signature(raw: &[u8], rel_id: &str, target_range: (i32, i32, i32, i32), fallback_anchor: (i32, i32, i32, i32)) -> Result<Vec<u8>, String> {
+fn rewrite_drawing_with_signature(raw: &[u8], rel_id: &str, picture_name: &str, target_range: (i32, i32, i32, i32), fallback_anchor: (i32, i32, i32, i32)) -> Result<Vec<u8>, String> {
     let mut reader = Reader::from_reader(Cursor::new(raw));
     let mut writer = Writer::new(Vec::new());
     let mut buf = Vec::new();
@@ -1214,7 +1319,7 @@ fn rewrite_drawing_with_signature(raw: &[u8], rel_id: &str, target_range: (i32, 
                 anchor = Some(state);
             }
             Event::End(event) if local_name(event.name().as_ref()) == b"wsDr" => {
-                writer.get_mut().write_all(&signature_anchor_xml(rel_id, fallback_anchor)).map_err(|err| format!("写入签名 anchor 失败: {err}"))?;
+                writer.get_mut().write_all(&signature_anchor_xml(rel_id, picture_name, fallback_anchor)).map_err(|err| format!("写入签名 anchor 失败: {err}"))?;
                 writer.write_event(Event::End(event.into_owned())).map_err(|err| format!("结束 drawing 失败: {err}"))?;
             }
             Event::Eof => break,
@@ -1294,10 +1399,15 @@ fn anchor_overlaps(state: &AnchorState, target: (i32, i32, i32, i32)) -> bool {
     from_col <= max_col && to_col >= min_col && from_row <= max_row && to_row >= min_row
 }
 
-fn signature_anchor_xml(rel_id: &str, bounds: (i32, i32, i32, i32)) -> Vec<u8> {
+fn signature_anchor_xml(rel_id: &str, picture_name: &str, bounds: (i32, i32, i32, i32)) -> Vec<u8> {
     let (from_col, from_row, to_col, to_row) = bounds;
+    let picture_id = rel_id
+        .strip_prefix("rId")
+        .and_then(|item| item.parse::<i32>().ok())
+        .map(|number| 9000 + number)
+        .unwrap_or(9001);
     format!(
-        r#"<xdr:twoCellAnchor editAs="oneCell"><xdr:from><xdr:col>{from_col}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{from_row}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>{to_col}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{to_row}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:pic><xdr:nvPicPr><xdr:cNvPr id="9001" name="Generated Signature"/><xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr><xdr:blipFill><a:blip r:embed="{rel_id}"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic><xdr:clientData/></xdr:twoCellAnchor>"#
+        r#"<xdr:twoCellAnchor editAs="oneCell"><xdr:from><xdr:col>{from_col}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{from_row}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>{to_col}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{to_row}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:pic><xdr:nvPicPr><xdr:cNvPr id="{picture_id}" name="{picture_name}"/><xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr><xdr:blipFill><a:blip r:embed="{rel_id}"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic><xdr:clientData/></xdr:twoCellAnchor>"#
     )
     .into_bytes()
 }
@@ -1902,6 +2012,22 @@ mod tests {
     }
 
     #[test]
+    fn manager_signature_index_matches_employee_names() {
+        let dir = std::env::temp_dir().join("excel-check-manager-signature-index-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("John  Doe.PNG"), b"not a real png").unwrap();
+        fs::write(dir.join("ignored.txt"), b"ignore").unwrap();
+
+        let index = build_manager_signature_index(Some(&dir.to_string_lossy())).unwrap();
+        assert!(index.find("John Doe").is_some());
+        assert!(index.find("john   doe").is_some());
+        assert!(index.find("Jane Doe").is_none());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn rust_generate_real_files_when_available() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
         let fixture_dir = root.join("fixtures").join("manual");
@@ -1910,6 +2036,33 @@ mod tests {
         if !(summary.exists() && template.exists()) {
             return;
         }
+        let schedule = Schedule {
+            morning_start: parse_time(DEFAULT_MORNING_START).unwrap(),
+            morning_end: parse_time(DEFAULT_MORNING_END).unwrap(),
+            afternoon_start: parse_time(DEFAULT_AFTERNOON_START).unwrap(),
+            afternoon_end: parse_time(DEFAULT_AFTERNOON_END).unwrap(),
+            normal_hours: DEFAULT_NORMAL_HOURS,
+        };
+        let summary_book = Workbook::open(&summary).unwrap();
+        let summary_sheet = summary_book.sheets.first().unwrap();
+        let template_book = Workbook::open(&template).unwrap();
+        let main_template = choose_sheet_or_first(&template_book.sheets, "New timesheet").unwrap();
+        let month_start = excel_serial_to_date(parse_number(main_template.sheet.value("M3")).unwrap() as i32).unwrap();
+        let month_days = days_in_month(month_start.0, month_start.1);
+        let employees = match read_summary_table(&summary_book, summary_sheet) {
+            Ok((_, employees)) => employees,
+            Err(_) => {
+                let day_headers = template_month_headers(main_template, month_start, month_days);
+                read_payroll_summary(summary_sheet, &day_headers, &schedule).unwrap()
+            }
+        };
+        let first_employee_name = employees.first().unwrap().name.clone();
+        let manager_dir = std::env::temp_dir().join("rust-generate-manager-signatures");
+        let _ = fs::remove_dir_all(&manager_dir);
+        fs::create_dir_all(&manager_dir).unwrap();
+        let font_path = root.join("Nothing_You_Could_Do").join("NothingYouCouldDo-Regular.ttf");
+        let manager_png = render_signature_png("Manager", &font_path, 100).unwrap();
+        fs::write(manager_dir.join(format!("{first_employee_name}.png")), manager_png).unwrap();
         let output = std::env::temp_dir().join("rust-generate-real-output");
         let _ = fs::remove_dir_all(&output);
         let result = run_generate(GeneratePayload {
@@ -1923,7 +2076,9 @@ mod tests {
             afternoon_start: DEFAULT_AFTERNOON_START.to_string(),
             afternoon_end: DEFAULT_AFTERNOON_END.to_string(),
             normal_hours: DEFAULT_NORMAL_HOURS.to_string(),
-            signature_font_path: Some(root.join("Nothing_You_Could_Do").join("NothingYouCouldDo-Regular.ttf").to_string_lossy().to_string()),
+            signature_font_path: Some(font_path.to_string_lossy().to_string()),
+            insert_manager_signature: true,
+            manager_signature_dir: Some(manager_dir.to_string_lossy().to_string()),
         })
         .unwrap();
         assert!(result.generated_count > 0);
@@ -1936,9 +2091,18 @@ mod tests {
             .entries
             .iter()
             .filter(|(name, _)| name.starts_with("xl/drawings/drawing") && name.ends_with(".xml"))
-            .filter(|(_, data)| String::from_utf8_lossy(data).contains("Generated Signature"))
+            .filter(|(_, data)| String::from_utf8_lossy(data).contains("Generated Employee Signature"))
             .count();
         assert!(generated_signature_refs >= 2);
+        assert!(book.entries.contains_key("xl/media/generated_manager_signature.png"));
+        let generated_manager_signature_refs = book
+            .entries
+            .iter()
+            .filter(|(name, _)| name.starts_with("xl/drawings/drawing") && name.ends_with(".xml"))
+            .filter(|(_, data)| String::from_utf8_lossy(data).contains("Generated Manager Signature"))
+            .count();
+        assert!(generated_manager_signature_refs >= 1);
         let _ = fs::remove_dir_all(output);
+        let _ = fs::remove_dir_all(manager_dir);
     }
 }

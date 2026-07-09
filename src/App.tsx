@@ -62,6 +62,8 @@ interface AppSettings {
   morningEnd: string;
   afternoonStart: string;
   afternoonEnd: string;
+  insertManagerSignature: boolean;
+  managerSignatureDir: string;
   autoOpenResult: boolean;
   keepLogDays: string;
 }
@@ -96,6 +98,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   morningEnd: "12:00",
   afternoonStart: "14:00",
   afternoonEnd: "18:00",
+  insertManagerSignature: false,
+  managerSignatureDir: "",
   autoOpenResult: false,
   keepLogDays: "30",
 };
@@ -659,6 +663,8 @@ function GeneratePage({
   const [morningEnd, setMorningEnd] = useLocalState("generate.morningEnd", settings.morningEnd);
   const [afternoonStart, setAfternoonStart] = useLocalState("generate.afternoonStart", settings.afternoonStart);
   const [afternoonEnd, setAfternoonEnd] = useLocalState("generate.afternoonEnd", settings.afternoonEnd);
+  const [insertManagerSignature, setInsertManagerSignature] = useLocalState("generate.insertManagerSignature", settings.insertManagerSignature);
+  const [managerSignatureDir, setManagerSignatureDir] = useLocalState("generate.managerSignatureDir", settings.managerSignatureDir);
   const [previewRows, setPreviewRows] = useState<EmployeePreviewRow[]>([]);
   const [previewLoaded, setPreviewLoaded] = useState(false);
 
@@ -695,6 +701,10 @@ function GeneratePage({
       addLog("请先选择汇总表和考勤表模板。");
       return;
     }
+    if (insertManagerSignature && !managerSignatureDir) {
+      addLog("请先选择管理层签名图片目录。");
+      return;
+    }
     setBusy("generating");
     try {
       addLog(`开始生成: ${fileName(tableC)}`);
@@ -709,6 +719,8 @@ function GeneratePage({
         afternoon_start: afternoonStart,
         afternoon_end: afternoonEnd,
         normal_hours: normalHours,
+        insert_manager_signature: insertManagerSignature,
+        manager_signature_dir: insertManagerSignature ? managerSignatureDir || null : null,
       };
       const data = await generateRust<GenerateResult>(payload);
       onResult(data);
@@ -742,10 +754,14 @@ function GeneratePage({
         <PathRow label="汇总表" value={tableC} kind="file" extensions={["xlsx", "xlsm"]} onChange={setTableC} />
         <PathRow label="考勤表模板" value={templateB} kind="file" extensions={["xlsx", "xlsm"]} onChange={setTemplateB} />
         <PathRow label="输出目录" value={outputDir} kind="folder" placeholder={settings.defaultOutputDir || "选择输出目录"} onChange={setOutputDir} />
+        {insertManagerSignature ? (
+          <PathRow label="管理层签名" value={managerSignatureDir} kind="folder" placeholder="选择按员工姓名命名的签名图片目录" onChange={setManagerSignatureDir} />
+        ) : null}
       </div>
 
       <div className="settings-strip">
         <Toggle checked={countHolidays} onChange={setCountHolidays} label="统计假期" />
+        <Toggle checked={insertManagerSignature} onChange={setInsertManagerSignature} label="管理层签名" />
         <label>签名大小<input type="number" min={30} max={200} value={signatureScale} onChange={(event) => setSignatureScale(Number(event.target.value))} /></label>
         <label>常规小时<input value={normalHours} onChange={(event) => setNormalHours(event.target.value)} /></label>
         <label>上午上班<input value={morningStart} onChange={(event) => setMorningStart(event.target.value)} /></label>

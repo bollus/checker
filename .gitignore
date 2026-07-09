@@ -12,3 +12,4 @@ __pycache__/
 *_核对结果_核对报告.txt
 /.codex
 /fixtures/
+/tmp/
