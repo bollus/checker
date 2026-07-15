@@ -69,9 +69,6 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Apply release version
-        run: node scripts/set-version.mjs ${{ needs.prepare-release.outputs.version }}
-
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
@@ -90,8 +87,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build frontend
-        run: npm run build
+      - name: Apply release version
+        run: node scripts/set-version.mjs ${{ needs.prepare-release.outputs.version }}
 
       - name: Remove stale Python and helper build artifacts
         shell: pwsh
@@ -138,9 +135,6 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Apply release version
-        run: node scripts/set-version.mjs ${{ needs.prepare-release.outputs.version }}
-
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
@@ -160,8 +154,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build frontend
-        run: npm run build
+      - name: Apply release version
+        run: node scripts/set-version.mjs ${{ needs.prepare-release.outputs.version }}
 
       - name: Remove stale Python and helper build artifacts
         run: |

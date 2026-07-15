@@ -22,7 +22,11 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "capabilities": [
+        "default",
+        "windows-updater"
+      ]
     }
   },
   "bundle": {

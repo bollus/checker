@@ -7,8 +7,5 @@
   "permissions": [
     "updater:default",
     "process:allow-restart"
-  ],
-  "capabilities": [
-    
   ]
 }
