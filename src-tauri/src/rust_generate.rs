@@ -787,8 +787,8 @@ fn write_employee(
         "xl/media/generated_signature.png",
         "Generated Employee Signature",
         SignaturePlacement::ContainLower,
-        (0, 41, 6, 43),
-        (1, 41, 3, 43),
+        (0, 41, 6, 44),
+        (1, 42, 3, 44),
     )?;
     if let Some(manager_signatures) = manager_signatures {
         if let Some(signature_path) = manager_signatures.find(&employee.name) {
@@ -803,8 +803,8 @@ fn write_employee(
                 &media_path,
                 "Generated Manager Signature",
                 SignaturePlacement::ContainLower,
-                (7, 41, 12, 43),
-                (7, 41, 12, 43),
+                (7, 41, 12, 44),
+                (7, 42, 12, 44),
             )?;
             if let Some(overtime_sheet) = overtime {
                 apply_signature(
