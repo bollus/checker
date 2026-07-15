@@ -107,6 +107,8 @@ jobs:
           Remove-Item -Force -ErrorAction SilentlyContinue src-tauri/target/release/rust_generate_cli.exe
 
       - name: Build Windows app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: npm run tauri:build -- --bundles nsis
 
       - name: Upload Windows bundles
@@ -115,6 +117,7 @@ jobs:
           name: excel-check-tool-windows-${{ needs.prepare-release.outputs.version }}
           path: |
             src-tauri/target/release/bundle/**/*.exe
+            src-tauri/target/release/bundle/**/*.exe.sig
           if-no-files-found: error
 
   build-macos:
@@ -168,7 +171,7 @@ jobs:
           rm -f src-tauri/target/release/rust_check_cli src-tauri/target/release/rust_generate_cli
 
       - name: Build macOS app
-        run: npm run tauri:build -- --bundles dmg,app
+        run: npm run tauri:build -- --bundles dmg,app --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       - name: Upload macOS bundles
         uses: actions/upload-artifact@v4
@@ -193,6 +196,9 @@ jobs:
         with:
           path: release-assets
 
+      - name: Create Windows updater manifest
+        run: node scripts/create-updater-manifest.mjs release-assets ${{ needs.prepare-release.outputs.version }} ${{ needs.prepare-release.outputs.tag }} bollus/checker
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
@@ -202,5 +208,7 @@ jobs:
           make_latest: true
           files: |
             release-assets/**/*.exe
+            release-assets/**/*.exe.sig
             release-assets/**/*.dmg
             release-assets/**/*.app.tar.gz
+            release-assets/latest.json

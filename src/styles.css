@@ -212,6 +212,19 @@ code {
   gap: 4px;
 }
 
+.titlebar-actions .update-check {
+  display: inline-flex;
+  width: auto;
+  min-width: 96px;
+  gap: 7px;
+  padding: 0 10px;
+  margin-right: 6px;
+  border-right: 1px solid #e2e7f1;
+  border-radius: 7px 0 0 7px;
+  font-size: 12px;
+  font-weight: 760;
+}
+
 .titlebar-actions button {
   display: grid;
   width: 34px;
@@ -231,6 +244,135 @@ code {
 .titlebar-actions button.close:hover {
   color: #ffffff;
   background: #e64c4c;
+}
+
+.update-overlay {
+  position: fixed;
+  z-index: 100;
+  inset: 42px 0 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(22, 29, 47, 0.28);
+  backdrop-filter: blur(3px);
+}
+
+.update-dialog {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 16px;
+  width: min(480px, calc(100vw - 48px));
+  padding: 22px;
+  border: 1px solid #dfe5f1;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 24px 70px rgba(29, 38, 67, 0.24);
+}
+
+.update-icon {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  color: #ffffff;
+  border-radius: 8px;
+  background: #5d62ed;
+}
+
+.update-copy {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.update-copy h2 {
+  font-size: 20px;
+}
+
+.update-kicker {
+  color: #5d62ed;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.update-notes {
+  max-height: 160px;
+  overflow: auto;
+  padding-right: 6px;
+  white-space: pre-wrap;
+}
+
+.update-progress,
+.update-error,
+.update-actions {
+  grid-column: 1 / -1;
+}
+
+.update-progress {
+  display: grid;
+  gap: 8px;
+}
+
+.update-progress > div {
+  display: flex;
+  justify-content: space-between;
+  color: #667289;
+  font-size: 12px;
+}
+
+.update-progress progress {
+  width: 100%;
+  height: 8px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 4px;
+  accent-color: #5d62ed;
+}
+
+.update-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  color: #a63e43;
+  border: 1px solid #f0cfd2;
+  border-radius: 7px;
+  background: #fff5f5;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.update-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 2px;
+}
+
+.update-toast {
+  position: fixed;
+  z-index: 110;
+  right: 18px;
+  top: 54px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(460px, calc(100vw - 36px));
+  min-height: 40px;
+  padding: 9px 13px;
+  color: #315d47;
+  border: 1px solid #cce7d8;
+  border-radius: 7px;
+  background: #f1fbf5;
+  box-shadow: 0 12px 30px rgba(34, 45, 76, 0.14);
+  font-size: 13px;
+}
+
+.update-toast.error {
+  color: #a63e43;
+  border-color: #f0cfd2;
+  background: #fff5f5;
+  text-align: left;
 }
 
 .app-shell {

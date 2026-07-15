@@ -1,4 +1,6 @@
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check, Update } from "@tauri-apps/plugin-updater";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   AlertCircle,
@@ -18,6 +20,7 @@ import {
   Minus,
   Play,
   Plus,
+  RefreshCw,
   RotateCcw,
   Save,
   Square,
@@ -131,7 +134,7 @@ function repairMojibake(value: string) {
 }
 
 function isGarbledText(value: string) {
-  return /�|Ã|Ä|Å|Æ|Ç|È|É|Ê|Ë|Ì|Í|Î|Ï|Ð|Ñ|Ò|Ó|Ô|Õ|Ö|Ø|Ù|Ú|Û|Ü/.test(value);
+  return /[�ÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜ]/.test(value);
 }
 
 function knownDefaultFieldName(rule: CheckRule) {
@@ -328,7 +331,7 @@ function CustomSelect({
   );
 }
 
-function TitleBar() {
+function TitleBar({ onCheckUpdate, checkingUpdate, showUpdater }: { onCheckUpdate: () => void; checkingUpdate: boolean; showUpdater: boolean }) {
   const appWindow = getCurrentWindow();
 
   return (
@@ -338,6 +341,12 @@ function TitleBar() {
         <span>表格核对工具</span>
       </div>
       <div className="titlebar-actions" data-tauri-drag-region="false">
+        {showUpdater ? (
+          <button className="update-check" type="button" onClick={onCheckUpdate} disabled={checkingUpdate} title="检查更新">
+            <RefreshCw className={checkingUpdate ? "spin" : ""} size={14} />
+            <span>检查更新</span>
+          </button>
+        ) : null}
         <button type="button" onClick={() => appWindow.minimize()} title="最小化">
           <Minus size={15} />
         </button>
@@ -967,6 +976,13 @@ export default function App() {
   const [settings] = useLocalState<AppSettings>("app.settings", DEFAULT_SETTINGS);
   const [checkResult, setCheckResult] = useState<CheckResult | null>(null);
   const [generateResult, setGenerateResult] = useState<GenerateResult | null>(null);
+  const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
+  const [updateState, setUpdateState] = useState<"idle" | "checking" | "downloading" | "error">("idle");
+  const [updateProgress, setUpdateProgress] = useState(0);
+  const [updateMessage, setUpdateMessage] = useState("");
+  const [updateNotice, setUpdateNotice] = useState("");
+
+  const isWindows = /Windows/i.test(navigator.userAgent);
 
   useEffect(() => {
     listTemplatesRust()
@@ -974,11 +990,69 @@ export default function App() {
       .catch((error) => addLog(error instanceof Error ? error.message : String(error)));
   }, []);
 
+  useEffect(() => {
+    if (!isWindows) return;
+    const timer = window.setTimeout(() => void checkForUpdate(false), 1200);
+    return () => window.clearTimeout(timer);
+  }, []);
+
   const selectedTemplate = templates[0] || DEFAULT_TEMPLATE;
 
   function addLog(text: string) {
     const time = new Date().toLocaleTimeString();
     setLog((items) => [...items, `${time}  ${text}`]);
+  }
+
+  async function checkForUpdate(manual: boolean) {
+    if (!isWindows || updateState === "checking" || updateState === "downloading") return;
+    setUpdateState("checking");
+    setUpdateMessage("");
+    try {
+      const nextUpdate = await check({ timeout: 15000 });
+      if (nextUpdate) {
+        setAvailableUpdate(nextUpdate);
+      } else if (manual) {
+        setUpdateNotice("当前已是最新版本");
+        window.setTimeout(() => setUpdateNotice(""), 2600);
+      }
+      setUpdateState("idle");
+    } catch (error) {
+      setUpdateState(manual ? "error" : "idle");
+      if (manual) setUpdateMessage(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function installUpdate() {
+    if (!availableUpdate) return;
+    setUpdateState("downloading");
+    setUpdateProgress(0);
+    setUpdateMessage("");
+    let received = 0;
+    let total = 0;
+    try {
+      await availableUpdate.downloadAndInstall((event) => {
+        if (event.event === "Started") {
+          total = event.data.contentLength || 0;
+        } else if (event.event === "Progress") {
+          received += event.data.chunkLength;
+          if (total > 0) setUpdateProgress(Math.min(100, Math.round((received / total) * 100)));
+        } else if (event.event === "Finished") {
+          setUpdateProgress(100);
+        }
+      });
+      await relaunch();
+    } catch (error) {
+      setUpdateState("error");
+      setUpdateMessage(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function dismissUpdate() {
+    if (updateState === "downloading") return;
+    await availableUpdate?.close();
+    setAvailableUpdate(null);
+    setUpdateState("idle");
+    setUpdateMessage("");
   }
 
   const nav = [
@@ -989,7 +1063,7 @@ export default function App() {
 
   return (
     <div className="app-frame">
-      <TitleBar />
+      <TitleBar onCheckUpdate={() => void checkForUpdate(true)} checkingUpdate={updateState === "checking"} showUpdater={isWindows} />
       <main className="app-shell">
         <aside className="sidebar">
           <nav>
@@ -1013,6 +1087,38 @@ export default function App() {
 
         <DetailPanel page={page} busy={busy} selectedTemplate={selectedTemplate} checkResult={checkResult} generateResult={generateResult} addLog={addLog} log={log} />
       </main>
+      {availableUpdate ? (
+        <div className="update-overlay" role="dialog" aria-modal="true" aria-label="软件更新">
+          <section className="update-dialog">
+            <div className="update-icon"><Download size={22} /></div>
+            <div className="update-copy">
+              <span className="update-kicker">发现新版本</span>
+              <h2>表格核对工具 {availableUpdate.version}</h2>
+              {availableUpdate.body ? <p className="update-notes">{availableUpdate.body}</p> : <p>新版本已准备好，可以直接更新。</p>}
+            </div>
+            {updateState === "downloading" ? (
+              <div className="update-progress">
+                <div><span>正在下载并安装</span><strong>{updateProgress}%</strong></div>
+                <progress max="100" value={updateProgress} />
+              </div>
+            ) : null}
+            {updateState === "error" && updateMessage ? <div className="update-error"><AlertCircle size={16} />{updateMessage}</div> : null}
+            <div className="update-actions">
+              <button className="secondary-button" type="button" onClick={() => void dismissUpdate()} disabled={updateState === "downloading"}>稍后更新</button>
+              <button className="primary-button" type="button" onClick={() => void installUpdate()} disabled={updateState === "downloading"}>
+                {updateState === "downloading" ? <Loader2 className="spin" size={16} /> : <Download size={16} />}
+                {updateState === "error" ? "重新更新" : "立即更新"}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+      {updateState === "error" && !availableUpdate && updateMessage ? (
+        <button className="update-toast error" type="button" onClick={() => { setUpdateState("idle"); setUpdateMessage(""); }}>
+          <AlertCircle size={16} />检查更新失败：{updateMessage}
+        </button>
+      ) : null}
+      {updateNotice ? <div className="update-toast"><CheckCircle2 size={16} />{updateNotice}</div> : null}
     </div>
   );
 }

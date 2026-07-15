@@ -27,6 +27,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "icon": [
       "icons/32x32.png",
@@ -45,6 +46,17 @@
       "../position_aliases.json": "position_aliases.json",
       "../position_rules.json": "position_rules.json",
       "../Nothing_You_Could_Do": "Nothing_You_Could_Do"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaW5pIHB1YmxpYyBrZXk6IEQyQUNGRDc1N0YwNjU5MDkKUldRSldRWi9kZjJzMG8yM1hlRXFMQzV4Vi92UHhWNnhNUHNOYTIzbTMwN2xFSlVSbFg3L1RsTVIK",
+      "endpoints": [
+        "https://github.com/bollus/checker/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

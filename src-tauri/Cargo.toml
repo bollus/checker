@@ -21,3 +21,7 @@ quick-xml = "0.38"
 png = "0.18"
 rusttype = "0.9"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+tauri-plugin-process = "2"
+tauri-plugin-updater = "2"
