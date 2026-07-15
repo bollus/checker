@@ -160,7 +160,6 @@ struct ManagerSignatureIndex {
 #[derive(Clone, Copy)]
 enum SignaturePlacement {
     Stretch,
-    Contain,
     ContainLower,
 }
 
@@ -594,11 +593,11 @@ fn write_employee(
         .map(|day| weekday_name(month_start.0, month_start.1, *day))
         .unwrap_or_else(|| "Friday".to_string());
     main_updates.insert("N7".to_string(), CellValue::Text(rest_weekday));
-    for row in 50..=70 {
+    for row in 51..=71 {
         main_updates.insert(format!("J{row}"), CellValue::Blank);
     }
     for (index, day) in holiday_days.iter().enumerate() {
-        main_updates.insert(format!("J{}", 50 + index as i32), CellValue::Number(date_to_excel_serial(month_start.0, month_start.1, *day) as f64));
+        main_updates.insert(format!("J{}", 51 + index as i32), CellValue::Number(date_to_excel_serial(month_start.0, month_start.1, *day) as f64));
     }
 
     let anchor_days = day_headers
@@ -735,11 +734,7 @@ fn write_employee(
     main_updates.insert("H9".to_string(), optional_cell(work_ot_sum + employee.correction_normal_ot));
     main_updates.insert("I9".to_string(), optional_cell(rest_ot_sum + employee.correction_weekend_ot));
     main_updates.insert("J9".to_string(), optional_cell(holiday_ot_sum + employee.correction_holiday_ot));
-    let holiday_styles = holiday_row_styles(&main_template.sheet, day_headers);
-    replacements.insert(
-        main_template.part_name.clone(),
-        rewrite_sheet(&template_book.entries[&main_template.part_name], &main_updates, &holiday_styles)?,
-    );
+    replacements.insert(main_template.part_name.clone(), rewrite_sheet(&template_book.entries[&main_template.part_name], &main_updates)?);
 
     if let Some(overtime_sheet) = overtime {
         let mut ot_updates = HashMap::new();
@@ -780,10 +775,7 @@ fn write_employee(
         ot_updates.insert("H44".to_string(), optional_cell(normal_days));
         ot_updates.insert("I44".to_string(), optional_cell(weekend_days));
         ot_updates.insert("J44".to_string(), optional_cell(holiday_days_count));
-        replacements.insert(
-            overtime_sheet.part_name.clone(),
-            rewrite_sheet(&template_book.entries[&overtime_sheet.part_name], &ot_updates, &HashMap::new())?,
-        );
+        replacements.insert(overtime_sheet.part_name.clone(), rewrite_sheet(&template_book.entries[&overtime_sheet.part_name], &ot_updates)?);
     }
 
     let signature_png = render_signature_png(&signature_text(&employee.name), signature_font_path, signature_scale)?;
@@ -794,7 +786,7 @@ fn write_employee(
         &signature_png,
         "xl/media/generated_signature.png",
         "Generated Employee Signature",
-        SignaturePlacement::Contain,
+        SignaturePlacement::ContainLower,
         (0, 41, 6, 43),
         (1, 41, 3, 43),
     )?;
@@ -856,27 +848,7 @@ fn write_employee(
     Ok(output_path)
 }
 
-fn holiday_row_styles(sheet: &Sheet, day_headers: &[(i32, String)]) -> HashMap<String, u32> {
-    let Some(source_row) = (10..=40).find(|row| sheet.value(&format!("K{row}")).eq_ignore_ascii_case("Weekend")) else {
-        return HashMap::new();
-    };
-    let mut styles = HashMap::new();
-    for (day, kind) in day_headers {
-        if kind != "holiday" {
-            continue;
-        }
-        let target_row = 9 + day;
-        for col_num in 1..=20 {
-            let col = num_to_col(col_num);
-            if let Some(style) = sheet.cells.get(&format!("{col}{source_row}")).and_then(|cell| cell.style) {
-                styles.insert(format!("{col}{target_row}"), style);
-            }
-        }
-    }
-    styles
-}
-
-fn rewrite_sheet(raw: &[u8], updates: &HashMap<String, CellValue>, style_updates: &HashMap<String, u32>) -> Result<Vec<u8>, String> {
+fn rewrite_sheet(raw: &[u8], updates: &HashMap<String, CellValue>) -> Result<Vec<u8>, String> {
     let mut reader = Reader::from_reader(Cursor::new(raw));
     let mut writer = Writer::new(Vec::new());
     let mut buf = Vec::new();
@@ -890,10 +862,8 @@ fn rewrite_sheet(raw: &[u8], updates: &HashMap<String, CellValue>, style_updates
             Ok(Event::Start(event)) if local_name(event.name().as_ref()) == b"c" => {
                 let ref_name = xml_attr(&reader, &event, b"r").unwrap_or_default().to_ascii_uppercase();
                 if let Some(value) = updates.get(&ref_name) {
-                    write_cell(&mut writer, &reader, &event, value, style_updates.get(&ref_name).copied())?;
+                    write_cell(&mut writer, &reader, &event, value)?;
                     skip_cell_depth = 1;
-                } else if let Some(style) = style_updates.get(&ref_name) {
-                    writer.write_event(Event::Start(with_cell_style(&reader, &event, *style)?)).map_err(|err| format!("写入单元格样式失败: {err}"))?;
                 } else {
                     writer.write_event(Event::Start(event.into_owned())).map_err(|err| format!("写入 sheet 失败: {err}"))?;
                 }
@@ -901,9 +871,7 @@ fn rewrite_sheet(raw: &[u8], updates: &HashMap<String, CellValue>, style_updates
             Ok(Event::Empty(event)) if local_name(event.name().as_ref()) == b"c" => {
                 let ref_name = xml_attr(&reader, &event, b"r").unwrap_or_default().to_ascii_uppercase();
                 if let Some(value) = updates.get(&ref_name) {
-                    write_cell(&mut writer, &reader, &event, value, style_updates.get(&ref_name).copied())?;
-                } else if let Some(style) = style_updates.get(&ref_name) {
-                    writer.write_event(Event::Empty(with_cell_style(&reader, &event, *style)?)).map_err(|err| format!("写入单元格样式失败: {err}"))?;
+                    write_cell(&mut writer, &reader, &event, value)?;
                 } else {
                     writer.write_event(Event::Empty(event.into_owned())).map_err(|err| format!("写入 sheet 失败: {err}"))?;
                 }
@@ -917,23 +885,9 @@ fn rewrite_sheet(raw: &[u8], updates: &HashMap<String, CellValue>, style_updates
     Ok(writer.into_inner())
 }
 
-fn with_cell_style(reader: &Reader<Cursor<&[u8]>>, event: &BytesStart<'_>, style: u32) -> Result<BytesStart<'static>, String> {
-    let mut cell = BytesStart::new("c");
-    for attr in event.attributes().with_checks(false) {
-        let attr = attr.map_err(|err| format!("读取单元格属性失败: {err}"))?;
-        if local_name(attr.key.as_ref()) != b"s" {
-            let key = std::str::from_utf8(attr.key.as_ref()).map_err(|err| format!("读取单元格属性名失败: {err}"))?;
-            let value = attr.decode_and_unescape_value(reader.decoder()).map_err(|err| format!("读取单元格属性值失败: {err}"))?;
-            cell.push_attribute((key, value.as_ref()));
-        }
-    }
-    cell.push_attribute(("s", style.to_string().as_str()));
-    Ok(cell.into_owned())
-}
-
-fn write_cell(writer: &mut Writer<Vec<u8>>, reader: &Reader<Cursor<&[u8]>>, event: &BytesStart<'_>, value: &CellValue, style_override: Option<u32>) -> Result<(), String> {
+fn write_cell(writer: &mut Writer<Vec<u8>>, reader: &Reader<Cursor<&[u8]>>, event: &BytesStart<'_>, value: &CellValue) -> Result<(), String> {
     let ref_name = xml_attr(reader, event, b"r").unwrap_or_default();
-    let style = style_override.map(|value| value.to_string()).or_else(|| xml_attr(reader, event, b"s"));
+    let style = xml_attr(reader, event, b"s");
     let mut cell = BytesStart::new("c");
     cell.push_attribute(("r", ref_name.as_str()));
     if let Some(style) = style.as_ref() {
@@ -1154,8 +1108,7 @@ fn apply_signature(
         .unwrap_or_else(empty_drawing);
     let anchor = match placement {
         SignaturePlacement::Stretch => AnchorBounds::from_cells(fallback_anchor),
-        SignaturePlacement::Contain => fit_image_anchor(book, sheet_info, signature_png, &extension, fallback_anchor, 0.5),
-        SignaturePlacement::ContainLower => fit_image_anchor(book, sheet_info, signature_png, &extension, fallback_anchor, 0.68),
+        SignaturePlacement::ContainLower => fit_image_anchor(book, sheet_info, signature_png, &extension, fallback_anchor, 0.88),
     };
     replacements.insert(drawing_part, rewrite_drawing_with_signature(&drawing_raw, &rel_id, picture_name, target_range, anchor)?);
     Ok(())
