@@ -1077,7 +1077,7 @@ fn iter_range_cells(start_ref: &str, end_ref: &str, sheet: &Sheet) -> Result<Vec
     let (start_col, start_row) = split_cell_ref(start_ref)?;
     let (end_col, end_row_text) = split_range_end(end_ref)?;
     let end_row = if end_row_text == "N" {
-        infer_data_end_row(sheet, start_row)
+        infer_data_end_row(sheet, start_row, &start_col, &end_col)
     } else {
         end_row_text.parse::<u32>().map_err(|_| format!("范围终点行号无效: {end_ref}"))?
     };
@@ -1091,7 +1091,7 @@ fn iter_range_cells(start_ref: &str, end_ref: &str, sheet: &Sheet) -> Result<Vec
     Ok(refs)
 }
 
-fn infer_data_end_row(sheet: &Sheet, start_row: u32) -> u32 {
+fn infer_data_end_row(sheet: &Sheet, start_row: u32, start_col: &str, end_col: &str) -> u32 {
     let mut current = start_row;
     let mut last_seen = start_row;
     loop {
@@ -1113,7 +1113,33 @@ fn infer_data_end_row(sheet: &Sheet, start_row: u32) -> u32 {
             break;
         }
     }
+    if current <= 2000 && is_adjustment_row(sheet, current, start_col, end_col) {
+        last_seen = current;
+    }
     last_seen
+}
+
+fn is_adjustment_row(sheet: &Sheet, row: u32, start_col: &str, end_col: &str) -> bool {
+    let row_text = (1..=col_to_num(end_col).max(13))
+        .map(|col| sheet.get_value(&format!("{}{row}", num_to_col(col))))
+        .filter(|value| !value.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_uppercase();
+    if row_text.contains("TOTAL") || row_text.contains("合计") || row_text.contains("总计") {
+        return false;
+    }
+    if row_text.contains("FIX OT")
+        || row_text.contains("CORRECTION")
+        || row_text.contains("ADJUSTMENT")
+        || (row_text.contains("修正") && (row_text.contains("加班") || row_text.contains("工时")))
+    {
+        return true;
+    }
+    (col_to_num(start_col)..=col_to_num(end_col)).any(|col| {
+        let value = sheet.get_value(&format!("{}{row}", num_to_col(col))).trim();
+        !value.is_empty() && parse_number(value).is_ok()
+    })
 }
 
 fn is_data_anchor(value: &str) -> bool {
@@ -1489,6 +1515,39 @@ mod tests {
             styles: HashMap::new(),
         };
         assert_eq!(resolve_table_b_value(&sheet, "SUM(G10:GN)").unwrap(), "17.5");
+    }
+
+    #[test]
+    fn sum_expression_includes_structural_adjustment_without_column_a_label() {
+        let sheet = Sheet {
+            cells: HashMap::from([
+                ("A10".to_string(), "1-Jun".to_string()),
+                ("A11".to_string(), "2-Jun".to_string()),
+                ("G10".to_string(), "10".to_string()),
+                ("G11".to_string(), "10".to_string()),
+                ("G12".to_string(), "-10".to_string()),
+                ("H12".to_string(), "1".to_string()),
+            ]),
+            styles: HashMap::new(),
+        };
+        assert_eq!(resolve_table_b_value(&sheet, "SUM(G10:GN)").unwrap(), "10");
+        assert_eq!(resolve_table_b_value(&sheet, "SUM(H10:HN)").unwrap(), "1");
+    }
+
+    #[test]
+    fn sum_expression_does_not_include_total_row() {
+        let sheet = Sheet {
+            cells: HashMap::from([
+                ("A10".to_string(), "1-Jun".to_string()),
+                ("A11".to_string(), "2-Jun".to_string()),
+                ("A12".to_string(), "Total (hours)".to_string()),
+                ("G10".to_string(), "10".to_string()),
+                ("G11".to_string(), "10".to_string()),
+                ("G12".to_string(), "20".to_string()),
+            ]),
+            styles: HashMap::new(),
+        };
+        assert_eq!(resolve_table_b_value(&sheet, "SUM(G10:GN)").unwrap(), "20");
     }
 
     #[test]
