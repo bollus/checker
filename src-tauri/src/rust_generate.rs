@@ -26,6 +26,8 @@ const OFFICE_REL_NS: &str = "http://schemas.openxmlformats.org/officeDocument/20
 pub struct GeneratePayload {
     pub table_c_path: String,
     pub template_b_path: String,
+    #[serde(default)]
+    pub graveyard_shift_path: Option<String>,
     pub output_dir: Option<String>,
     #[serde(default)]
     pub count_holidays: bool,
@@ -136,6 +138,37 @@ struct Employee {
     correction_holiday_ot: f64,
 }
 
+#[derive(Clone, Default)]
+struct GraveyardRecord {
+    hours_by_day: HashMap<i32, f64>,
+}
+
+#[derive(Default)]
+struct GraveyardIndex {
+    records: Vec<GraveyardRecord>,
+    by_employee_no: HashMap<String, Vec<usize>>,
+    by_passport: HashMap<String, Vec<usize>>,
+    by_name: HashMap<String, Vec<usize>>,
+}
+
+#[derive(Clone)]
+struct TimesheetLayout {
+    employee_no_col: String,
+    month_col: String,
+    vacation_col: String,
+    sick_col: String,
+    rest_col: String,
+    emergency_col: String,
+    remark_col: String,
+    graveyard_col: Option<String>,
+    actual_checkout_col: String,
+    attendance_diff_col: String,
+    normal_adjust_col: String,
+    weekend_adjust_col: String,
+    holiday_adjust_col: String,
+    payable_marker_col: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum DayEntry {
     Blank,
@@ -230,12 +263,13 @@ pub fn run_generate(payload: GeneratePayload) -> Result<GenerateResult, String> 
     let summary_sheet = summary_book.sheets.first().ok_or_else(|| "汇总表没有工作表".to_string())?;
     let template_book = Workbook::open(&template_path)?;
     let main_template = choose_sheet_or_first(&template_book.sheets, "New timesheet").ok_or_else(|| "模板没有考勤主表".to_string())?;
-    let month_start = excel_serial_to_date(parse_number(main_template.sheet.value("M3"))? as i32)?;
+    let layout = TimesheetLayout::from_sheet(&main_template.sheet);
+    let month_start = excel_serial_to_date(parse_number(main_template.sheet.value(&format!("{}3", layout.month_col)))? as i32)?;
     let month_days = days_in_month(month_start.0, month_start.1);
     let (day_headers, employees) = match read_summary_table(&summary_book, summary_sheet) {
         Ok(result) => result,
         Err(summary_error) => {
-            let day_headers = template_month_headers(main_template, month_start, month_days);
+            let day_headers = template_month_headers(main_template, month_start, month_days, &layout);
             let employees = read_payroll_summary(summary_sheet, &day_headers, &schedule)
                 .map_err(|payroll_error| format!("{summary_error}; {payroll_error}"))?;
             (day_headers, employees)
@@ -244,6 +278,19 @@ pub fn run_generate(payload: GeneratePayload) -> Result<GenerateResult, String> 
     if employees.is_empty() {
         return Err("Rust 生成引擎未读取到员工数据，请确认 A/E/F/G/K/L/M 列结构".to_string());
     }
+    let graveyard_path = payload
+        .graveyard_shift_path
+        .as_ref()
+        .filter(|path| !path.trim().is_empty())
+        .map(PathBuf::from);
+    let graveyard_index = if let Some(path) = graveyard_path.as_ref() {
+        if !path.is_file() {
+            return Err(format!("Rust 生成引擎未找到深夜加班汇总表: {}", path.display()));
+        }
+        Some(GraveyardIndex::from_workbook(&Workbook::open(path)?, month_days)?)
+    } else {
+        None
+    };
 
     let output_dir = payload
         .output_dir
@@ -254,11 +301,21 @@ pub fn run_generate(payload: GeneratePayload) -> Result<GenerateResult, String> 
     fs::create_dir_all(&output_dir).map_err(|err| format!("创建输出目录失败: {err}"))?;
     let mut generated_files = Vec::new();
     let mut warnings = Vec::new();
+    if layout.graveyard_col.is_some() && graveyard_index.is_none() {
+        warnings.push("模板包含深夜加班列，但未选择深夜加班汇总表；该列将保持为空".to_string());
+    } else if layout.graveyard_col.is_none() && graveyard_index.is_some() {
+        warnings.push("已选择深夜加班汇总表，但当前考勤模板没有深夜加班列，相关数据未写入".to_string());
+    }
     let total = employees.len();
+    let mut graveyard_matches = 0usize;
     let mut progress = ProgressSnapshot { current: 0, total, message: String::new() };
     for (index, employee) in employees.iter().enumerate() {
         progress.current = index + 1;
         progress.message = format!("生成 {}.{}", employee.no, employee.name);
+        let graveyard = graveyard_index.as_ref().and_then(|items| items.find(employee));
+        if graveyard.is_some() {
+            graveyard_matches += 1;
+        }
         let output = write_employee(
             &template_book,
             main_template,
@@ -272,12 +329,25 @@ pub fn run_generate(payload: GeneratePayload) -> Result<GenerateResult, String> 
             &signature_font_path,
             payload.signature_scale,
             manager_signatures.as_ref(),
+            &layout,
+            graveyard.as_ref(),
             &mut warnings,
         )?;
         generated_files.push(output);
     }
+    if graveyard_index.is_some() {
+        warnings.push(format!("深夜加班数据匹配员工: {graveyard_matches}/{}", employees.len()));
+    }
     let report_path = output_dir.join("生成说明.txt");
-    write_report(&report_path, &generated_files, &template_path, payload.count_holidays, &schedule, &warnings)?;
+    write_report(
+        &report_path,
+        &generated_files,
+        &template_path,
+        graveyard_path.as_deref(),
+        payload.count_holidays,
+        &schedule,
+        &warnings,
+    )?;
     if generated_files.is_empty() {
         warnings.push("未生成任何文件".to_string());
     }
@@ -372,8 +442,16 @@ fn read_payroll_summary(sheet: &WorkbookSheet, day_headers: &[(i32, String)], sc
     Ok(employees)
 }
 
-fn template_month_headers(main_template: &WorkbookSheet, month_start: (i32, i32, i32), month_days: i32) -> Vec<(i32, String)> {
-    let rest_weekday = main_template.sheet.value("N7").trim();
+fn template_month_headers(
+    main_template: &WorkbookSheet,
+    month_start: (i32, i32, i32),
+    month_days: i32,
+    layout: &TimesheetLayout,
+) -> Vec<(i32, String)> {
+    let rest_weekday = main_template
+        .sheet
+        .value(&format!("{}7", layout.actual_checkout_col))
+        .trim();
     let rest_weekday = if rest_weekday.is_empty() { "Friday" } else { rest_weekday };
     (1..=month_days)
         .map(|day| {
@@ -543,11 +621,11 @@ fn collect_xf_fill_ids(raw: &[u8]) -> Result<Vec<u32>, String> {
 
 fn parse_summary_value(raw: &str) -> Result<DayEntry, String> {
     let text = raw.trim();
-    if text.is_empty() || text == "\\" {
+    if text.is_empty() || text == "\\" || text.eq_ignore_ascii_case("Rest Day") {
         return Ok(DayEntry::Blank);
     }
     let upper = text.to_ascii_uppercase();
-    if matches!(upper.as_str(), "A" | "E" | "S" | "V") {
+    if matches!(upper.as_str(), "A" | "C" | "E" | "S" | "V") {
         return Ok(DayEntry::Leave(upper));
     }
     Ok(DayEntry::Hours(parse_number(text)?))
@@ -566,6 +644,8 @@ fn write_employee(
     signature_font_path: &Path,
     signature_scale: i32,
     manager_signatures: Option<&ManagerSignatureIndex>,
+    layout: &TimesheetLayout,
+    graveyard: Option<&GraveyardRecord>,
     warnings: &mut Vec<String>,
 ) -> Result<PathBuf, String> {
     let mut replacements: HashMap<String, Vec<u8>> = HashMap::new();
@@ -576,8 +656,8 @@ fn write_employee(
     main_updates.insert("E3".to_string(), CellValue::Text(employee.passport.clone()));
     main_updates.insert("G3".to_string(), CellValue::Text(employee.project.clone()));
     main_updates.insert("I3".to_string(), CellValue::Text(employee.crew_group.clone()));
-    main_updates.insert("J3".to_string(), CellValue::Text(employee.employee_no.clone()));
-    main_updates.insert("N8".to_string(), CellValue::Number(schedule.normal_hours));
+    main_updates.insert(format!("{}3", layout.employee_no_col), CellValue::Text(employee.employee_no.clone()));
+    main_updates.insert(format!("{}8", layout.actual_checkout_col), CellValue::Number(schedule.normal_hours));
     let holiday_days = day_headers
         .iter()
         .filter(|(_, kind)| kind == "holiday")
@@ -592,7 +672,7 @@ fn write_employee(
         .first()
         .map(|day| weekday_name(month_start.0, month_start.1, *day))
         .unwrap_or_else(|| "Friday".to_string());
-    main_updates.insert("N7".to_string(), CellValue::Text(rest_weekday));
+    main_updates.insert(format!("{}7", layout.actual_checkout_col), CellValue::Text(rest_weekday));
     for row in 51..=71 {
         main_updates.insert(format!("J{row}"), CellValue::Blank);
     }
@@ -604,7 +684,9 @@ fn write_employee(
         .iter()
         .filter_map(|(day, _)| {
             let entry = employee.days.get(day).unwrap_or(&DayEntry::Blank);
-            if entry_is_attended(entry) || matches!(entry, DayEntry::Leave(code) if code == "V" || code == "S") {
+            if entry_is_attended(entry)
+                || matches!(entry, DayEntry::Leave(code) if code == "V" || code == "S" || code == "C")
+            {
                 Some(*day)
             } else {
                 None
@@ -629,6 +711,7 @@ fn write_employee(
     let mut vacation_days = 0;
     let mut sick_days = 0;
     let mut emergency_days = 0;
+    let mut china_days = 0;
     let mut overtime_entries = Vec::new();
     for (day, kind) in day_headers {
         let row = 9 + day;
@@ -643,7 +726,15 @@ fn write_employee(
             (first_active, last_active, prefix_unpaid, suffix_unpaid),
             &unpaid_adjacent_special_days,
             schedule,
+            layout,
         );
+        if let Some(col) = layout.graveyard_col.as_ref() {
+            let hours = graveyard
+                .and_then(|record| record.hours_by_day.get(day))
+                .copied()
+                .unwrap_or(0.0);
+            main_updates.insert(format!("{col}{row}"), optional_cell(hours));
+        }
         work_sum += result.work_hours;
         work_ot_sum += result.work_ot;
         rest_ot_sum += result.rest_hours;
@@ -674,20 +765,47 @@ fn write_employee(
                 sick_days += 1;
             } else if code == "E" {
                 emergency_days += 1;
+            } else if code == "C" {
+                china_days += 1;
             }
         }
     }
     for day in (day_headers.len() as i32 + 1)..32 {
         let row = 9 + day;
-        for col in ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "N", "O", "P", "Q", "R", "T"] {
+        let mut cols = vec![
+            "A".to_string(),
+            "B".to_string(),
+            "C".to_string(),
+            "D".to_string(),
+            "E".to_string(),
+            "F".to_string(),
+            "G".to_string(),
+            "H".to_string(),
+            "I".to_string(),
+            "J".to_string(),
+            layout.remark_col.clone(),
+            layout.actual_checkout_col.clone(),
+            layout.attendance_diff_col.clone(),
+            layout.normal_adjust_col.clone(),
+            layout.weekend_adjust_col.clone(),
+            layout.holiday_adjust_col.clone(),
+            layout.payable_marker_col.clone(),
+        ];
+        if let Some(col) = layout.graveyard_col.as_ref() {
+            cols.push(col.clone());
+        }
+        for col in cols {
             main_updates.insert(format!("{col}{row}"), CellValue::Blank);
         }
     }
-    let correction_row = find_correction_row(&main_template.sheet).unwrap_or(40);
+    let correction_row = find_correction_row(&main_template.sheet).unwrap_or(10 + day_headers.len() as i32);
     main_updates.insert(format!("G{correction_row}"), optional_cell(employee.correction_nwh));
     main_updates.insert(format!("H{correction_row}"), optional_cell(employee.correction_normal_ot));
     main_updates.insert(format!("I{correction_row}"), optional_cell(employee.correction_weekend_ot));
     main_updates.insert(format!("J{correction_row}"), optional_cell(employee.correction_holiday_ot));
+    if let Some(col) = layout.graveyard_col.as_ref() {
+        main_updates.insert(format!("{col}{correction_row}"), CellValue::Blank);
+    }
 
     let mut public_payable = 0;
     let mut rest_payable = 0;
@@ -704,10 +822,14 @@ fn write_employee(
         if !count_holidays && matches!(entry, DayEntry::Leave(code) if code == "V") {
             continue;
         }
-        if kind == "holiday" && update_has_value(&main_updates, &format!("T{}", 9 + day)) {
+        if kind == "holiday"
+            && update_has_value(&main_updates, &format!("{}{}", layout.payable_marker_col, 9 + day))
+        {
             public_payable += 1;
         }
-        if kind == "rest" && update_has_value(&main_updates, &format!("T{}", 9 + day)) {
+        if kind == "rest"
+            && update_has_value(&main_updates, &format!("{}{}", layout.payable_marker_col, 9 + day))
+        {
             rest_payable += 1;
         }
     }
@@ -725,15 +847,29 @@ fn write_employee(
     main_updates.insert("A6".to_string(), CellValue::Number(day_headers.len() as f64));
     main_updates.insert("B6".to_string(), optional_cell(payable_day_count));
     main_updates.insert("E6".to_string(), optional_cell(work_day_count));
+    main_updates.insert("H6".to_string(), optional_cell(china_days as f64));
     main_updates.insert("I6".to_string(), optional_cell(public_day_count));
-    main_updates.insert("J6".to_string(), optional_cell(vacation_day_count));
-    main_updates.insert("K6".to_string(), optional_cell(sick_day_count));
-    main_updates.insert("L6".to_string(), optional_cell(rest_day_count));
-    main_updates.insert("M6".to_string(), if count_holidays { CellValue::Blank } else { optional_cell(emergency_days as f64) });
+    main_updates.insert(format!("{}6", layout.vacation_col), optional_cell(vacation_day_count));
+    main_updates.insert(format!("{}6", layout.sick_col), optional_cell(sick_day_count));
+    main_updates.insert(format!("{}6", layout.rest_col), optional_cell(rest_day_count));
+    main_updates.insert(
+        format!("{}6", layout.emergency_col),
+        if count_holidays {
+            CellValue::Blank
+        } else {
+            optional_cell(emergency_days as f64)
+        },
+    );
     main_updates.insert("G9".to_string(), optional_cell(normal_total));
     main_updates.insert("H9".to_string(), optional_cell(work_ot_sum + employee.correction_normal_ot));
     main_updates.insert("I9".to_string(), optional_cell(rest_ot_sum + employee.correction_weekend_ot));
     main_updates.insert("J9".to_string(), optional_cell(holiday_ot_sum + employee.correction_holiday_ot));
+    if let Some(col) = layout.graveyard_col.as_ref() {
+        let graveyard_total = graveyard
+            .map(|record| record.hours_by_day.values().sum::<f64>())
+            .unwrap_or(0.0);
+        main_updates.insert(format!("{col}9"), optional_cell(graveyard_total));
+    }
     replacements.insert(main_template.part_name.clone(), rewrite_sheet(&template_book.entries[&main_template.part_name], &main_updates)?);
 
     if let Some(overtime_sheet) = overtime {
@@ -779,6 +915,7 @@ fn write_employee(
     }
 
     let signature_png = render_signature_png(&signature_text(&employee.name), signature_font_path, signature_scale)?;
+    let signature_row_offset = correction_row - 40;
     apply_signature(
         template_book,
         &mut replacements,
@@ -787,8 +924,8 @@ fn write_employee(
         "xl/media/generated_signature.png",
         "Generated Employee Signature",
         SignaturePlacement::ContainLower,
-        (0, 41, 6, 44),
-        (1, 42, 3, 44),
+        (0, 41 + signature_row_offset, 6, 44 + signature_row_offset),
+        (1, 42 + signature_row_offset, 3, 44 + signature_row_offset),
     )?;
     if let Some(manager_signatures) = manager_signatures {
         if let Some(signature_path) = manager_signatures.find(&employee.name) {
@@ -803,8 +940,8 @@ fn write_employee(
                 &media_path,
                 "Generated Manager Signature",
                 SignaturePlacement::ContainLower,
-                (7, 41, 12, 44),
-                (7, 42, 12, 44),
+                (7, 41 + signature_row_offset, 12, 44 + signature_row_offset),
+                (7, 42 + signature_row_offset, 12, 44 + signature_row_offset),
             )?;
             if let Some(overtime_sheet) = overtime {
                 apply_signature(
@@ -1928,10 +2065,192 @@ fn choose_sheet_or_first<'a>(sheets: &'a [WorkbookSheet], name: &str) -> Option<
     choose_sheet(sheets, name).or_else(|| sheets.first())
 }
 
+impl TimesheetLayout {
+    fn from_sheet(sheet: &Sheet) -> Self {
+        let employee_no_col = find_header_column(sheet, 2, &["EMPLOYEE NO", "员工编号"]).unwrap_or_else(|| "J".to_string());
+        let month_col = find_header_column(sheet, 2, &["MONTH", "月份"]).unwrap_or_else(|| "M".to_string());
+        let graveyard_col = find_header_column(sheet, 8, &["LATE-NIGHT", "GRAVEYARD", "深夜加班"]);
+        let shifted = graveyard_col.is_some();
+        Self {
+            employee_no_col,
+            month_col,
+            vacation_col: find_header_column(sheet, 5, &["VACATION", "带薪休假"]).unwrap_or_else(|| if shifted { "K" } else { "J" }.to_string()),
+            sick_col: find_header_column(sheet, 5, &["SICK LEAVE", "病假"]).unwrap_or_else(|| if shifted { "L" } else { "K" }.to_string()),
+            rest_col: find_header_column(sheet, 5, &["REST DAY", "周末假期"]).unwrap_or_else(|| if shifted { "M" } else { "L" }.to_string()),
+            emergency_col: find_header_column(sheet, 5, &["EMERGENCY", "事假"]).unwrap_or_else(|| if shifted { "N" } else { "M" }.to_string()),
+            remark_col: find_header_column(sheet, 7, &["REMARK", "备注"]).unwrap_or_else(|| if shifted { "L" } else { "K" }.to_string()),
+            graveyard_col,
+            actual_checkout_col: if shifted { "O" } else { "N" }.to_string(),
+            attendance_diff_col: if shifted { "P" } else { "O" }.to_string(),
+            normal_adjust_col: if shifted { "Q" } else { "P" }.to_string(),
+            weekend_adjust_col: if shifted { "R" } else { "Q" }.to_string(),
+            holiday_adjust_col: if shifted { "S" } else { "R" }.to_string(),
+            payable_marker_col: if shifted { "U" } else { "T" }.to_string(),
+        }
+    }
+}
+
+fn find_header_column(sheet: &Sheet, row: i32, needles: &[&str]) -> Option<String> {
+    for col in 1..=64 {
+        let value = sheet.value(&format!("{}{row}", num_to_col(col)));
+        let upper = value.to_ascii_uppercase();
+        if needles.iter().any(|needle| upper.contains(&needle.to_ascii_uppercase())) {
+            return Some(num_to_col(col));
+        }
+    }
+    None
+}
+
+impl GraveyardIndex {
+    fn from_workbook(book: &Workbook, expected_month_days: i32) -> Result<Self, String> {
+        let (sheet, header_row, employee_no_col, name_col, passport_col, day_columns, total_col) = book
+            .sheets
+            .iter()
+            .find_map(|sheet| detect_graveyard_headers(&sheet.sheet).map(|headers| (sheet, headers)))
+            .map(|(sheet, (header_row, employee_no_col, name_col, passport_col, day_columns, total_col))| {
+                (sheet, header_row, employee_no_col, name_col, passport_col, day_columns, total_col)
+            })
+            .ok_or_else(|| "深夜加班汇总表未找到姓名、员工编号、护照及每日数据表头".to_string())?;
+        let max_row = sheet
+            .sheet
+            .cells
+            .keys()
+            .filter_map(|cell| split_cell_position(cell).map(|(_, row)| row))
+            .max()
+            .unwrap_or(header_row);
+        let mut index = Self::default();
+        for row in (header_row + 1)..=max_row {
+            let employee_no = sheet.sheet.value(&format!("{employee_no_col}{row}")).trim().to_string();
+            let passport = sheet.sheet.value(&format!("{passport_col}{row}")).trim().to_string();
+            let name = sheet.sheet.value(&format!("{name_col}{row}")).trim().to_string();
+            if employee_no.is_empty() && passport.is_empty() && name.is_empty() {
+                continue;
+            }
+            let mut hours_by_day = HashMap::new();
+            for (day, col) in &day_columns {
+                if *day > expected_month_days {
+                    continue;
+                }
+                let raw = sheet.sheet.value(&format!("{col}{row}")).trim();
+                if raw.is_empty() {
+                    continue;
+                }
+                let hours = parse_number(raw).map_err(|_| format!("深夜加班汇总表 {col}{row} 不是有效小时数: {raw:?}"))?;
+                if hours.abs() > 0.000001 {
+                    hours_by_day.insert(*day, hours);
+                }
+            }
+            if hours_by_day.is_empty() {
+                continue;
+            }
+            let calculated = hours_by_day.values().sum::<f64>();
+            let stated = parse_optional_number(sheet.sheet.value(&format!("{total_col}{row}")));
+            if stated.abs() > 0.000001 && (calculated - stated).abs() > 0.000001 {
+                return Err(format!(
+                    "深夜加班汇总表第 {row} 行每日工时合计不一致: 每日数据合计为 {}，表内 TOTAL HOURS 为 {}",
+                    number_to_text(calculated),
+                    number_to_text(stated)
+                ));
+            }
+            let record_index = index.records.len();
+            index.records.push(GraveyardRecord { hours_by_day });
+            add_graveyard_lookup(&mut index.by_employee_no, normalize_identifier(&employee_no), record_index);
+            add_graveyard_lookup(&mut index.by_passport, normalize_identifier(&passport), record_index);
+            add_graveyard_lookup(&mut index.by_name, normalize_person_name(&name), record_index);
+        }
+        if index.records.is_empty() {
+            return Err("深夜加班汇总表未读取到有效深夜加班数据".to_string());
+        }
+        Ok(index)
+    }
+
+    fn find(&self, employee: &Employee) -> Option<GraveyardRecord> {
+        let candidates = [
+            self.by_employee_no.get(&normalize_identifier(&employee.employee_no)),
+            self.by_passport.get(&normalize_identifier(&employee.passport)),
+            self.by_name.get(&normalize_person_name(&employee.name)),
+        ];
+        for indices in candidates.into_iter().flatten() {
+            if indices.is_empty() {
+                continue;
+            }
+            let mut merged = GraveyardRecord { hours_by_day: HashMap::new() };
+            for index in indices {
+                for (day, hours) in &self.records[*index].hours_by_day {
+                    *merged.hours_by_day.entry(*day).or_insert(0.0) += hours;
+                }
+            }
+            return Some(merged);
+        }
+        None
+    }
+}
+
+fn detect_graveyard_headers(sheet: &Sheet) -> Option<(i32, String, String, String, Vec<(i32, String)>, String)> {
+    for row in 1..=20 {
+        let Some(employee_no_col) = find_header_column(sheet, row, &["EMP-ID", "EMPLOYEE NO", "员工编号", "工号"]) else {
+            continue;
+        };
+        let Some(name_col) = find_header_column(sheet, row, &["NAME", "姓名"]) else {
+            continue;
+        };
+        let Some(passport_col) = find_header_column(sheet, row, &["PASSPORT", "护照"]) else {
+            continue;
+        };
+        let Some(total_col) = find_header_column(sheet, row, &["TOTAL HOURS", "合计"]) else {
+            continue;
+        };
+        let mut day_columns = Vec::new();
+        for col in 1..=50 {
+            let value = sheet.value(&format!("{}{row}", num_to_col(col))).trim();
+            if let Ok(day) = value.parse::<i32>() {
+                if (1..=31).contains(&day) {
+                    day_columns.push((day, num_to_col(col)));
+                }
+            }
+        }
+        if day_columns.len() >= 28 {
+            return Some((row, employee_no_col, name_col, passport_col, day_columns, total_col));
+        }
+    }
+    None
+}
+
+fn add_graveyard_lookup(map: &mut HashMap<String, Vec<usize>>, key: String, index: usize) {
+    if !key.is_empty() {
+        map.entry(key).or_default().push(index);
+    }
+}
+
+fn normalize_identifier(value: &str) -> String {
+    value.chars().filter(|ch| ch.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
+fn normalize_person_name(value: &str) -> String {
+    value
+        .split_whitespace()
+        .flat_map(|part| part.chars().filter(|ch| ch.is_alphanumeric()).flat_map(char::to_lowercase))
+        .collect()
+}
+
+fn split_cell_position(cell: &str) -> Option<(String, i32)> {
+    let split = cell.find(|ch: char| ch.is_ascii_digit())?;
+    Some((cell[..split].to_string(), cell[split..].parse().ok()?))
+}
+
 fn find_correction_row(sheet: &Sheet) -> Option<i32> {
     for row in 35..=45 {
-        let text = sheet.value(&format!("A{row}"));
-        if text.contains("修正上月加班") || text.to_ascii_uppercase().contains("FIX OT") {
+        let text = (col_to_num("A")..=col_to_num("M"))
+            .map(|col| sheet.value(&format!("{}{row}", num_to_col(col))))
+            .filter(|value| !value.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let upper = text.to_ascii_uppercase();
+        if upper.contains("FIX OT")
+            || upper.contains("CORRECTION")
+            || upper.contains("ADJUSTMENT")
+            || (text.contains("修正") && (text.contains("加班") || text.contains("工时")))
+        {
             return Some(row);
         }
     }
@@ -1983,8 +2302,29 @@ fn fill_day_updates(
     payable_context: (Option<i32>, Option<i32>, bool, bool),
     unpaid_adjacent_special_days: &HashSet<i32>,
     schedule: &Schedule,
+    layout: &TimesheetLayout,
 ) -> DayFillResult {
-    for col in ["C", "D", "E", "F", "G", "H", "I", "J", "K", "N", "O", "P", "Q", "R", "T"] {
+    let mut clear_cols = vec![
+        "C".to_string(),
+        "D".to_string(),
+        "E".to_string(),
+        "F".to_string(),
+        "G".to_string(),
+        "H".to_string(),
+        "I".to_string(),
+        "J".to_string(),
+        layout.remark_col.clone(),
+        layout.actual_checkout_col.clone(),
+        layout.attendance_diff_col.clone(),
+        layout.normal_adjust_col.clone(),
+        layout.weekend_adjust_col.clone(),
+        layout.holiday_adjust_col.clone(),
+        layout.payable_marker_col.clone(),
+    ];
+    if let Some(col) = layout.graveyard_col.as_ref() {
+        clear_cols.push(col.clone());
+    }
+    for col in clear_cols {
         updates.insert(format!("{col}{row}"), CellValue::Blank);
     }
     updates.insert(format!("A{row}"), CellValue::Number(date_to_excel_serial(month_start.0, month_start.1, day) as f64));
@@ -1998,7 +2338,7 @@ fn fill_day_updates(
             set_optional_number(updates, &format!("D{row}"), d);
             set_optional_number(updates, &format!("E{row}"), e);
             set_optional_number(updates, &format!("F{row}"), f);
-            set_optional_number(updates, &format!("N{row}"), f);
+            set_optional_number(updates, &format!("{}{row}", layout.actual_checkout_col), f);
             if day_type == "work" {
                 result.work_hours = hours.min(schedule.normal_hours);
                 result.work_ot = (hours - schedule.normal_hours).max(0.0);
@@ -2010,7 +2350,10 @@ fn fill_day_updates(
             result.payable = true;
         }
         DayEntry::Leave(code) => {
-            updates.insert(format!("K{row}"), CellValue::Text(leave_label(code).to_string()));
+            updates.insert(
+                format!("{}{row}", layout.remark_col),
+                CellValue::Text(leave_label(code).to_string()),
+            );
             result.payable = code == "V" || code == "S";
         }
         _ => {
@@ -2027,22 +2370,25 @@ fn fill_day_updates(
     }
 
     if !matches!(entry, DayEntry::Leave(_)) && day_type == "rest" {
-        updates.insert(format!("K{row}"), CellValue::Text("Weekend".to_string()));
+        updates.insert(format!("{}{row}", layout.remark_col), CellValue::Text("Weekend".to_string()));
     } else if !matches!(entry, DayEntry::Leave(_)) && day_type == "holiday" {
-        updates.insert(format!("K{row}"), CellValue::Text("Public Holiday".to_string()));
+        updates.insert(
+            format!("{}{row}", layout.remark_col),
+            CellValue::Text("Public Holiday".to_string()),
+        );
     }
     updates.insert(format!("G{row}"), optional_cell(result.work_hours));
     updates.insert(format!("H{row}"), optional_cell(result.work_ot));
     updates.insert(format!("I{row}"), optional_cell(result.rest_hours));
     updates.insert(format!("J{row}"), optional_cell(result.holiday_hours));
-    updates.insert(format!("P{row}"), optional_cell(result.work_ot));
-    updates.insert(format!("Q{row}"), optional_cell(result.rest_hours));
-    updates.insert(format!("R{row}"), optional_cell(result.holiday_hours));
+    updates.insert(format!("{}{row}", layout.normal_adjust_col), optional_cell(result.work_ot));
+    updates.insert(format!("{}{row}", layout.weekend_adjust_col), optional_cell(result.rest_hours));
+    updates.insert(format!("{}{row}", layout.holiday_adjust_col), optional_cell(result.holiday_hours));
     if entry_is_attended(entry) {
-        updates.insert(format!("O{row}"), CellValue::Number(0.0));
+        updates.insert(format!("{}{row}", layout.attendance_diff_col), CellValue::Number(0.0));
     }
     if result.payable {
-        updates.insert(format!("T{row}"), CellValue::Number(1.0));
+        updates.insert(format!("{}{row}", layout.payable_marker_col), CellValue::Number(1.0));
     }
     result
 }
@@ -2050,6 +2396,7 @@ fn fill_day_updates(
 fn leave_label(code: &str) -> &'static str {
     match code {
         "A" => "Absent",
+        "C" => "Working in China",
         "E" => "Emergency Leave",
         "S" => "Sick Leave",
         "V" => "Vacation",
@@ -2220,9 +2567,21 @@ fn civil_from_days(days: i32) -> Option<(i32, i32, i32)> {
     }
 }
 
-fn write_report(report_path: &Path, generated_files: &[PathBuf], template_path: &Path, count_holidays: bool, schedule: &Schedule, warnings: &[String]) -> Result<(), String> {
+fn write_report(
+    report_path: &Path,
+    generated_files: &[PathBuf],
+    template_path: &Path,
+    graveyard_path: Option<&Path>,
+    count_holidays: bool,
+    schedule: &Schedule,
+    warnings: &[String],
+) -> Result<(), String> {
     let mut lines = vec![
         format!("模板表B: {}", template_path.display()),
+        format!(
+            "深夜加班汇总表: {}",
+            graveyard_path.map(|path| path.display().to_string()).unwrap_or_else(|| "未选择".to_string())
+        ),
         format!("生成数量: {}", generated_files.len()),
         format!("是否统计假期: {}", if count_holidays { "是" } else { "否" }),
         format!("常规工作小时数: {}", number_to_text(schedule.normal_hours)),
@@ -2247,6 +2606,70 @@ mod tests {
         let serial = date_to_excel_serial(2026, 6, 1);
         assert_eq!(excel_serial_to_date(serial).unwrap(), (2026, 6, 1));
         assert_eq!(weekday_name(2026, 6, 5), "Friday");
+    }
+
+    #[test]
+    fn correction_row_marker_can_be_outside_column_a() {
+        let sheet = Sheet {
+            cells: HashMap::from([(
+                "B40".to_string(),
+                CellData {
+                    value: "修正上月加班时长".to_string(),
+                    style: None,
+                },
+            )]),
+        };
+        assert_eq!(find_correction_row(&sheet), Some(40));
+    }
+
+    #[test]
+    fn late_night_template_layout_detects_shifted_columns() {
+        let cells = [
+            ("K2", "Employee No.员工编号"),
+            ("N2", "Month月份"),
+            ("K5", "Scheduled / Paid Vacation带薪休假"),
+            ("L5", "Sick Leave病假"),
+            ("M5", "Rest Day周末假期"),
+            ("N5", "Emergency Leaves事假"),
+            ("L7", "Remark备注"),
+            ("K8", "late-night深夜加班"),
+        ]
+        .into_iter()
+        .map(|(cell, value)| {
+            (
+                cell.to_string(),
+                CellData {
+                    value: value.to_string(),
+                    style: None,
+                },
+            )
+        })
+        .collect();
+        let layout = TimesheetLayout::from_sheet(&Sheet { cells });
+        assert_eq!(layout.employee_no_col, "K");
+        assert_eq!(layout.month_col, "N");
+        assert_eq!(layout.vacation_col, "K");
+        assert_eq!(layout.remark_col, "L");
+        assert_eq!(layout.graveyard_col.as_deref(), Some("K"));
+        assert_eq!(layout.actual_checkout_col, "O");
+        assert_eq!(layout.payable_marker_col, "U");
+    }
+
+    #[test]
+    fn graveyard_source_keeps_daily_hours_without_conversion_when_available() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let source = root.join(
+            "tmp/Appendix 3：Graveyard Shift Attendance Record for International Employees~附录3：国际雇员深夜班考勤表2026-07（预考勤） - ARA.xlsx",
+        );
+        if !source.exists() {
+            return;
+        }
+        let index = GraveyardIndex::from_workbook(&Workbook::open(&source).unwrap(), 31).unwrap();
+        let record_index = index.by_employee_no[&normalize_identifier("WEP2-0373")][0];
+        let record = &index.records[record_index];
+        assert_eq!(record.hours_by_day.get(&11), Some(&2.0));
+        assert_eq!(record.hours_by_day.get(&12), Some(&4.0));
+        assert_eq!(record.hours_by_day.values().sum::<f64>(), 13.0);
     }
 
     #[test]
@@ -2285,16 +2708,20 @@ mod tests {
         let summary_sheet = summary_book.sheets.first().unwrap();
         let template_book = Workbook::open(&template).unwrap();
         let main_template = choose_sheet_or_first(&template_book.sheets, "New timesheet").unwrap();
-        let month_start = excel_serial_to_date(parse_number(main_template.sheet.value("M3")).unwrap() as i32).unwrap();
+        let layout = TimesheetLayout::from_sheet(&main_template.sheet);
+        let month_start =
+            excel_serial_to_date(parse_number(main_template.sheet.value(&format!("{}3", layout.month_col))).unwrap() as i32)
+                .unwrap();
         let month_days = days_in_month(month_start.0, month_start.1);
         let employees = match read_summary_table(&summary_book, summary_sheet) {
             Ok((_, employees)) => employees,
             Err(_) => {
-                let day_headers = template_month_headers(main_template, month_start, month_days);
+                let day_headers = template_month_headers(main_template, month_start, month_days, &layout);
                 read_payroll_summary(summary_sheet, &day_headers, &schedule).unwrap()
             }
         };
-        let first_employee_name = employees.first().unwrap().name.clone();
+        let first_employee = employees.first().unwrap().clone();
+        let first_employee_name = first_employee.name.clone();
         let manager_dir = std::env::temp_dir().join("rust-generate-manager-signatures");
         let _ = fs::remove_dir_all(&manager_dir);
         fs::create_dir_all(&manager_dir).unwrap();
@@ -2306,8 +2733,9 @@ mod tests {
         let result = run_generate(GeneratePayload {
             table_c_path: summary.to_string_lossy().to_string(),
             template_b_path: template.to_string_lossy().to_string(),
+            graveyard_shift_path: None,
             output_dir: Some(output.to_string_lossy().to_string()),
-            count_holidays: false,
+            count_holidays: true,
             signature_scale: 100,
             morning_start: DEFAULT_MORNING_START.to_string(),
             morning_end: DEFAULT_MORNING_END.to_string(),
@@ -2322,8 +2750,29 @@ mod tests {
         assert!(result.generated_count > 0);
         assert!(PathBuf::from(result.report_path).exists());
         assert!(result.generated_files.iter().all(|item| PathBuf::from(item).exists()));
-        let first_file = PathBuf::from(&result.generated_files[0]);
+        let first_file = result
+            .generated_files
+            .iter()
+            .map(PathBuf::from)
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&format!("{}.", first_employee.no)))
+            })
+            .unwrap();
         let book = Workbook::open(&first_file).unwrap();
+        let generated_main = choose_sheet_or_first(&book.sheets, "New timesheet").unwrap();
+        let correction_row = find_correction_row(&generated_main.sheet).unwrap_or(40);
+        let weekend_detail_total = (10..=correction_row)
+            .map(|row| parse_optional_number(generated_main.sheet.value(&format!("I{row}"))))
+            .sum::<f64>();
+        assert!((weekend_detail_total - parse_optional_number(generated_main.sheet.value("I9"))).abs() < 0.000001);
+        assert!(
+            (parse_optional_number(generated_main.sheet.value(&format!("I{correction_row}")))
+                - first_employee.correction_weekend_ot)
+                .abs()
+                < 0.000001
+        );
         assert!(book.entries.contains_key("xl/media/generated_signature.png"));
         let generated_signature_refs = book
             .entries
@@ -2340,7 +2789,24 @@ mod tests {
             .filter(|(_, data)| String::from_utf8_lossy(data).contains("Generated Manager Signature"))
             .count();
         assert!(generated_manager_signature_refs >= 2);
+
+        let check_template: crate::rust_check::CheckTemplate =
+            serde_json::from_str(&fs::read_to_string(fixture_dir.join("外包模板-WEP-2026.5.15.json")).unwrap()).unwrap();
+        let check_output = std::env::temp_dir().join("rust-generate-holiday-check.xlsx");
+        let check_report = std::env::temp_dir().join("rust-generate-holiday-check_核对报告.txt");
+        let check_result = crate::rust_check::run_check(crate::rust_check::CheckPayload {
+            table_a_path: summary.to_string_lossy().to_string(),
+            table_bs_folder: output.to_string_lossy().to_string(),
+            output_path: Some(check_output.to_string_lossy().to_string()),
+            template: check_template,
+            position_aliases_path: Some(root.join("position_aliases.json").to_string_lossy().to_string()),
+            position_rules_path: Some(root.join("position_rules.json").to_string_lossy().to_string()),
+        })
+        .unwrap();
+        assert_eq!(check_result.mismatch_count, 0);
         let _ = fs::remove_dir_all(output);
         let _ = fs::remove_dir_all(manager_dir);
+        let _ = fs::remove_file(check_output);
+        let _ = fs::remove_file(check_report);
     }
 }

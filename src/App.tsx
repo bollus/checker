@@ -664,6 +664,7 @@ function GeneratePage({
 }) {
   const [tableC, setTableC] = useLocalState("generate.tableC", "");
   const [templateB, setTemplateB] = useLocalState("generate.templateB", "");
+  const [graveyardShift, setGraveyardShift] = useLocalState("generate.graveyardShift", "");
   const [outputDir, setOutputDir] = useLocalState("generate.outputDir", "");
   const [countHolidays, setCountHolidays] = useLocalState("generate.countHolidays", settings.countHolidays);
   const [signatureScale, setSignatureScale] = useLocalState("generate.signatureScale", settings.signatureScale);
@@ -720,6 +721,7 @@ function GeneratePage({
       const payload = {
         table_c_path: tableC,
         template_b_path: templateB,
+        graveyard_shift_path: graveyardShift || null,
         output_dir: outputDir || null,
         count_holidays: countHolidays,
         signature_scale: signatureScale,
@@ -762,6 +764,14 @@ function GeneratePage({
       <div className="panel">
         <PathRow label="汇总表" value={tableC} kind="file" extensions={["xlsx", "xlsm"]} onChange={setTableC} />
         <PathRow label="考勤表模板" value={templateB} kind="file" extensions={["xlsx", "xlsm"]} onChange={setTemplateB} />
+        <PathRow
+          label="深夜加班汇总表"
+          value={graveyardShift}
+          kind="file"
+          extensions={["xlsx", "xlsm"]}
+          placeholder="可选，仅深夜加班模板需要"
+          onChange={setGraveyardShift}
+        />
         <PathRow label="输出目录" value={outputDir} kind="folder" placeholder={settings.defaultOutputDir || "选择输出目录"} onChange={setOutputDir} />
         {insertManagerSignature ? (
           <PathRow label="管理层签名" value={managerSignatureDir} kind="folder" placeholder="选择按员工姓名命名的签名图片目录" onChange={setManagerSignatureDir} />
