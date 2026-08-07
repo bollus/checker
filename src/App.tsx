@@ -60,7 +60,7 @@ interface AppSettings {
   defaultOutputDir: string;
   countHolidays: boolean;
   signatureScale: number;
-  signatureHeight: number;
+  signatureVerticalOffset: number;
   normalHours: string;
   morningStart: string;
   morningEnd: string;
@@ -97,7 +97,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   defaultOutputDir: "",
   countHolidays: false,
   signatureScale: 100,
-  signatureHeight: 100,
+  signatureVerticalOffset: 15,
   normalHours: "10",
   morningStart: "06:00",
   morningEnd: "12:00",
@@ -670,9 +670,9 @@ function GeneratePage({
   const [outputDir, setOutputDir] = useLocalState("generate.outputDir", "");
   const [countHolidays, setCountHolidays] = useLocalState("generate.countHolidays", settings.countHolidays);
   const [signatureScale, setSignatureScale] = useLocalState("generate.signatureScale", settings.signatureScale);
-  const [signatureHeight, setSignatureHeight] = useLocalState(
-    "generate.signatureHeight",
-    settings.signatureHeight ?? DEFAULT_SETTINGS.signatureHeight,
+  const [signatureVerticalOffset, setSignatureVerticalOffset] = useLocalState(
+    "generate.signatureVerticalOffset",
+    settings.signatureVerticalOffset ?? DEFAULT_SETTINGS.signatureVerticalOffset,
   );
   const [normalHours, setNormalHours] = useLocalState("generate.normalHours", settings.normalHours);
   const [morningStart, setMorningStart] = useLocalState("generate.morningStart", settings.morningStart);
@@ -731,7 +731,7 @@ function GeneratePage({
         output_dir: outputDir || null,
         count_holidays: countHolidays,
         signature_scale: signatureScale,
-        signature_height: signatureHeight,
+        signature_vertical_offset: signatureVerticalOffset,
         morning_start: morningStart,
         morning_end: morningEnd,
         afternoon_start: afternoonStart,
@@ -789,7 +789,7 @@ function GeneratePage({
         <Toggle checked={countHolidays} onChange={setCountHolidays} label="统计假期" />
         <Toggle checked={insertManagerSignature} onChange={setInsertManagerSignature} label="管理层签名" />
         <label>签名大小<input type="number" min={30} max={200} value={signatureScale} onChange={(event) => setSignatureScale(Number(event.target.value))} /></label>
-        <label>签名高度<input type="number" min={50} max={200} value={signatureHeight} onChange={(event) => setSignatureHeight(Number(event.target.value))} /></label>
+        <label>签名上移%<input type="number" min={-50} max={50} value={signatureVerticalOffset} onChange={(event) => setSignatureVerticalOffset(Number(event.target.value))} /></label>
         <label>常规小时<input value={normalHours} onChange={(event) => setNormalHours(event.target.value)} /></label>
         <label>上午上班<input value={morningStart} onChange={(event) => setMorningStart(event.target.value)} /></label>
         <label>上午下班<input value={morningEnd} onChange={(event) => setMorningEnd(event.target.value)} /></label>

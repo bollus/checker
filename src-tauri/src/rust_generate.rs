@@ -33,8 +33,8 @@ pub struct GeneratePayload {
     pub count_holidays: bool,
     #[serde(default = "default_signature_scale")]
     pub signature_scale: i32,
-    #[serde(default = "default_signature_height")]
-    pub signature_height: i32,
+    #[serde(default = "default_signature_vertical_offset")]
+    pub signature_vertical_offset: i32,
     #[serde(default = "default_morning_start")]
     pub morning_start: String,
     #[serde(default = "default_morning_end")]
@@ -54,7 +54,7 @@ pub struct GeneratePayload {
 }
 
 fn default_signature_scale() -> i32 { 100 }
-fn default_signature_height() -> i32 { 100 }
+fn default_signature_vertical_offset() -> i32 { 15 }
 fn default_morning_start() -> String { DEFAULT_MORNING_START.to_string() }
 fn default_morning_end() -> String { DEFAULT_MORNING_END.to_string() }
 fn default_afternoon_start() -> String { DEFAULT_AFTERNOON_START.to_string() }
@@ -241,8 +241,8 @@ pub fn run_generate(payload: GeneratePayload) -> Result<GenerateResult, String> 
     if payload.signature_scale < 30 || payload.signature_scale > 200 {
         return Err("签名大小必须在 30% 到 200% 之间".to_string());
     }
-    if payload.signature_height < 50 || payload.signature_height > 200 {
-        return Err("签名高度必须在 50% 到 200% 之间".to_string());
+    if payload.signature_vertical_offset < -50 || payload.signature_vertical_offset > 50 {
+        return Err("签名上移比例必须在 -50% 到 50% 之间".to_string());
     }
     let signature_font_path = resolve_signature_font(payload.signature_font_path.as_deref())?;
     let manager_signatures = if payload.insert_manager_signature {
@@ -334,7 +334,7 @@ pub fn run_generate(payload: GeneratePayload) -> Result<GenerateResult, String> 
             payload.count_holidays,
             &signature_font_path,
             payload.signature_scale,
-            payload.signature_height,
+            payload.signature_vertical_offset,
             manager_signatures.as_ref(),
             &layout,
             graveyard.as_ref(),
@@ -650,7 +650,7 @@ fn write_employee(
     count_holidays: bool,
     signature_font_path: &Path,
     signature_scale: i32,
-    signature_height: i32,
+    signature_vertical_offset: i32,
     manager_signatures: Option<&ManagerSignatureIndex>,
     layout: &TimesheetLayout,
     graveyard: Option<&GraveyardRecord>,
@@ -932,7 +932,7 @@ fn write_employee(
         "xl/media/generated_signature.png",
         "Generated Employee Signature",
         SignaturePlacement::ContainLower,
-        signature_height,
+        signature_vertical_offset,
         (0, 41 + signature_row_offset, 6, 44 + signature_row_offset),
         (1, 42 + signature_row_offset, 3, 44 + signature_row_offset),
     )?;
@@ -949,7 +949,7 @@ fn write_employee(
                 &media_path,
                 "Generated Manager Signature",
                 SignaturePlacement::ContainLower,
-                signature_height,
+                signature_vertical_offset,
                 (7, 41 + signature_row_offset, 12, 44 + signature_row_offset),
                 (7, 42 + signature_row_offset, 12, 44 + signature_row_offset),
             )?;
@@ -962,7 +962,7 @@ fn write_employee(
                     &media_path,
                     "Generated Manager Signature",
                     SignaturePlacement::ContainLower,
-                    signature_height,
+                    signature_vertical_offset,
                     (5, 56, 9, 58),
                     (5, 56, 9, 58),
                 )?;
@@ -980,7 +980,7 @@ fn write_employee(
             "xl/media/generated_signature.png",
             "Generated Employee Signature",
             SignaturePlacement::Stretch,
-            signature_height,
+            signature_vertical_offset,
             (4, 52, 9, 52),
             (7, 51, 8, 53),
         )?;
@@ -1231,7 +1231,7 @@ fn apply_signature(
     media_path: &str,
     picture_name: &str,
     placement: SignaturePlacement,
-    height_percent: i32,
+    vertical_offset_percent: i32,
     target_range: (i32, i32, i32, i32),
     fallback_anchor: (i32, i32, i32, i32),
 ) -> Result<(), String> {
@@ -1257,7 +1257,12 @@ fn apply_signature(
         .cloned()
         .unwrap_or_else(empty_drawing);
     let anchor = match placement {
-        SignaturePlacement::Stretch => AnchorBounds::from_cells(fallback_anchor),
+        SignaturePlacement::Stretch => shifted_cell_anchor(
+            book,
+            sheet_info,
+            fallback_anchor,
+            vertical_offset_percent as f64 / 100.0,
+        ),
         SignaturePlacement::ContainLower => fit_image_anchor(
             book,
             sheet_info,
@@ -1265,7 +1270,7 @@ fn apply_signature(
             &extension,
             fallback_anchor,
             0.88,
-            height_percent as f64 / 100.0,
+            vertical_offset_percent as f64 / 100.0,
         ),
     };
     replacements.insert(drawing_part, rewrite_drawing_with_signature(&drawing_raw, &rel_id, picture_name, target_range, anchor)?);
@@ -1289,7 +1294,7 @@ fn fit_image_anchor(
     extension: &str,
     bounds: (i32, i32, i32, i32),
     vertical_alignment: f64,
-    height_scale: f64,
+    upward_offset: f64,
 ) -> AnchorBounds {
     let Some((image_width, image_height)) = image_dimensions(image_bytes, extension) else {
         return AnchorBounds::from_cells(bounds);
@@ -1309,17 +1314,42 @@ fn fit_image_anchor(
     }
     let image_ratio = image_width as f64 / image_height as f64;
     let target_ratio = target_width / target_height;
-    let (fit_width, natural_height) = if image_ratio > target_ratio {
+    let (fit_width, fit_height) = if image_ratio > target_ratio {
         (target_width * 0.92, target_width * 0.92 / image_ratio)
     } else {
         (target_height * 0.82 * image_ratio, target_height * 0.82)
     };
-    let fit_height = (natural_height * height_scale).min(target_height * 0.98);
     let offset_x = ((target_width - fit_width) / 2.0).max(0.0);
-    let offset_y = ((target_height - fit_height) * vertical_alignment).max(0.0);
+    let available_height = (target_height - fit_height).max(0.0);
+    let offset_y = (available_height * vertical_alignment - target_height * upward_offset)
+        .clamp(0.0, available_height);
     AnchorBounds {
         from: metrics.marker_from_offset(from_col, from_row, offset_x, offset_y),
         to: metrics.marker_from_offset(from_col, from_row, offset_x + fit_width, offset_y + fit_height),
+    }
+}
+
+fn shifted_cell_anchor(
+    book: &Workbook,
+    sheet_info: &WorkbookSheet,
+    bounds: (i32, i32, i32, i32),
+    upward_offset: f64,
+) -> AnchorBounds {
+    let Some(sheet_raw) = book.entries.get(&sheet_info.part_name) else {
+        return AnchorBounds::from_cells(bounds);
+    };
+    let metrics = parse_sheet_metrics(sheet_raw);
+    let (from_col, from_row, to_col, to_row) = bounds;
+    let left = metrics.range_width_pixels(0, from_col);
+    let right = metrics.range_width_pixels(0, to_col);
+    let top = metrics.range_height_pixels(0, from_row);
+    let bottom = metrics.range_height_pixels(0, to_row);
+    let shift = (bottom - top).max(0.0) * upward_offset;
+    let shifted_top = (top - shift).max(0.0);
+    let shifted_bottom = (bottom - shift).max(shifted_top);
+    AnchorBounds {
+        from: metrics.marker_from_offset(0, 0, left, shifted_top),
+        to: metrics.marker_from_offset(0, 0, right, shifted_bottom),
     }
 }
 
@@ -2767,7 +2797,7 @@ mod tests {
             output_dir: Some(output.to_string_lossy().to_string()),
             count_holidays: true,
             signature_scale: 100,
-            signature_height: 100,
+            signature_vertical_offset: 15,
             morning_start: DEFAULT_MORNING_START.to_string(),
             morning_end: DEFAULT_MORNING_END.to_string(),
             afternoon_start: DEFAULT_AFTERNOON_START.to_string(),
