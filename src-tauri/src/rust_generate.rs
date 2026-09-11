@@ -885,6 +885,14 @@ fn write_employee(
         ot_updates.insert("B5".to_string(), CellValue::Text(employee.name.clone()));
         ot_updates.insert("B7".to_string(), CellValue::Text(employee.project.clone()));
         ot_updates.insert("I7".to_string(), CellValue::Text(employee.position.clone()));
+        let apply_date_cell = find_apply_date_cell(&overtime_sheet.sheet).unwrap_or_else(|| "I5".to_string());
+        ot_updates.insert(
+            apply_date_cell,
+            overtime_entries
+                .first()
+                .map(|entry| CellValue::Text(format_apply_date(month_start.0, month_start.1, entry.day)))
+                .unwrap_or(CellValue::Blank),
+        );
         let correction = find_correction_row(&overtime_sheet.sheet).unwrap_or(42);
         for row in 12..=correction {
             for col in ["A", "B", "E", "H", "I", "J"] {
@@ -2317,6 +2325,36 @@ fn find_correction_row(sheet: &Sheet) -> Option<i32> {
     None
 }
 
+fn find_apply_date_cell(sheet: &Sheet) -> Option<String> {
+    sheet.cells.iter().find_map(|(cell, data)| {
+        let normalized = data.value.split_whitespace().collect::<String>().to_ascii_lowercase();
+        if !normalized.contains("applydate") && !data.value.contains("申请日期") {
+            return None;
+        }
+        let (column, row) = split_cell_position(cell)?;
+        Some(format!("{}{row}", num_to_col(col_to_num(&column) + 1)))
+    })
+}
+
+fn format_apply_date(year: i32, month: i32, day: i32) -> String {
+    const MONTHS: [&str; 12] = [
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December",
+    ];
+    let suffix = if (11..=13).contains(&(day % 100)) {
+        "th"
+    } else {
+        match day % 10 {
+            1 => "st",
+            2 => "nd",
+            3 => "rd",
+            _ => "th",
+        }
+    };
+    let month_name = MONTHS.get((month - 1) as usize).copied().unwrap_or("");
+    format!("{day}{suffix} {month_name}-{:02}", year.rem_euclid(100))
+}
+
 fn parse_time(value: &str) -> Result<f64, String> {
     let (hour, minute) = value.trim().split_once(':').ok_or_else(|| format!("时间格式无效: {value}"))?;
     let hour = hour.parse::<i32>().map_err(|_| format!("时间格式无效: {value}"))?;
@@ -2683,6 +2721,23 @@ mod tests {
     }
 
     #[test]
+    fn overtime_apply_date_uses_first_overtime_day() {
+        let sheet = Sheet {
+            cells: HashMap::from([(
+                "H5".to_string(),
+                CellData {
+                    value: "申请日期 Apply Date:".to_string(),
+                    style: None,
+                },
+            )]),
+        };
+        assert_eq!(find_apply_date_cell(&sheet).as_deref(), Some("I5"));
+        assert_eq!(format_apply_date(2026, 7, 1), "1st July-26");
+        assert_eq!(format_apply_date(2026, 7, 2), "2nd July-26");
+        assert_eq!(format_apply_date(2026, 7, 13), "13th July-26");
+    }
+
+    #[test]
     fn late_night_template_layout_detects_shifted_columns() {
         let cells = [
             ("K2", "Employee No.员工编号"),
@@ -2823,6 +2878,14 @@ mod tests {
             .unwrap();
         let book = Workbook::open(&first_file).unwrap();
         let generated_main = choose_sheet_or_first(&book.sheets, "New timesheet").unwrap();
+        if let Some(generated_overtime) = choose_sheet(&book.sheets, "Overtime") {
+            let apply_date_cell = find_apply_date_cell(&generated_overtime.sheet).unwrap_or_else(|| "I5".to_string());
+            let apply_date = generated_overtime.sheet.value(&apply_date_cell);
+            assert!(!apply_date.contains("#CALC!"));
+            if !generated_overtime.sheet.value("A12").is_empty() {
+                assert!(!apply_date.is_empty());
+            }
+        }
         let correction_row = find_correction_row(&generated_main.sheet).unwrap_or(40);
         let weekend_detail_total = (10..=correction_row)
             .map(|row| parse_optional_number(generated_main.sheet.value(&format!("I{row}"))))
