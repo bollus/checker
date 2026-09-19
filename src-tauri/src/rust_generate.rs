@@ -885,6 +885,20 @@ fn write_employee(
         ot_updates.insert("B5".to_string(), CellValue::Text(employee.name.clone()));
         ot_updates.insert("B7".to_string(), CellValue::Text(employee.project.clone()));
         ot_updates.insert("I7".to_string(), CellValue::Text(employee.position.clone()));
+        let employee_no_cell = find_labeled_value_cell(
+            &overtime_sheet.sheet,
+            &["employeeno", "员工编号"],
+            2,
+        )
+        .unwrap_or_else(|| "F5".to_string());
+        let crew_group_cell = find_labeled_value_cell(
+            &overtime_sheet.sheet,
+            &["crewgroup", "作业队机组"],
+            2,
+        )
+        .unwrap_or_else(|| "F7".to_string());
+        ot_updates.insert(employee_no_cell, CellValue::Text(employee.employee_no.clone()));
+        ot_updates.insert(crew_group_cell, CellValue::Text(employee.crew_group.clone()));
         let apply_date_cell = find_apply_date_cell(&overtime_sheet.sheet).unwrap_or_else(|| "I5".to_string());
         ot_updates.insert(
             apply_date_cell,
@@ -2336,6 +2350,22 @@ fn find_apply_date_cell(sheet: &Sheet) -> Option<String> {
     })
 }
 
+fn find_labeled_value_cell(sheet: &Sheet, aliases: &[&str], column_offset: i32) -> Option<String> {
+    sheet.cells.iter().find_map(|(cell, data)| {
+        let normalized = data
+            .value
+            .chars()
+            .filter(|ch| ch.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect::<String>();
+        if !aliases.iter().any(|alias| normalized.contains(alias)) {
+            return None;
+        }
+        let (column, row) = split_cell_position(cell)?;
+        Some(format!("{}{row}", num_to_col(col_to_num(&column) + column_offset)))
+    })
+}
+
 fn format_apply_date(year: i32, month: i32, day: i32) -> String {
     const MONTHS: [&str; 12] = [
         "January", "February", "March", "April", "May", "June",
@@ -2738,6 +2768,36 @@ mod tests {
     }
 
     #[test]
+    fn overtime_employee_fields_follow_header_labels() {
+        let sheet = Sheet {
+            cells: HashMap::from([
+                (
+                    "D5".to_string(),
+                    CellData {
+                        value: "员工编号 Employee No.:".to_string(),
+                        style: None,
+                    },
+                ),
+                (
+                    "D7".to_string(),
+                    CellData {
+                        value: "作业队/机组 Crew/Group:".to_string(),
+                        style: None,
+                    },
+                ),
+            ]),
+        };
+        assert_eq!(
+            find_labeled_value_cell(&sheet, &["employeeno", "员工编号"], 2).as_deref(),
+            Some("F5")
+        );
+        assert_eq!(
+            find_labeled_value_cell(&sheet, &["crewgroup", "作业队机组"], 2).as_deref(),
+            Some("F7")
+        );
+    }
+
+    #[test]
     fn late_night_template_layout_detects_shifted_columns() {
         let cells = [
             ("K2", "Employee No.员工编号"),
@@ -2885,6 +2945,20 @@ mod tests {
             if !generated_overtime.sheet.value("A12").is_empty() {
                 assert!(!apply_date.is_empty());
             }
+            let employee_no_cell = find_labeled_value_cell(
+                &generated_overtime.sheet,
+                &["employeeno", "员工编号"],
+                2,
+            )
+            .unwrap_or_else(|| "F5".to_string());
+            let crew_group_cell = find_labeled_value_cell(
+                &generated_overtime.sheet,
+                &["crewgroup", "作业队机组"],
+                2,
+            )
+            .unwrap_or_else(|| "F7".to_string());
+            assert_eq!(generated_overtime.sheet.value(&employee_no_cell), first_employee.employee_no);
+            assert_eq!(generated_overtime.sheet.value(&crew_group_cell), first_employee.crew_group);
         }
         let correction_row = find_correction_row(&generated_main.sheet).unwrap_or(40);
         let weekend_detail_total = (10..=correction_row)
