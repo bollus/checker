@@ -141,6 +141,24 @@ struct Employee {
     correction_holiday_ot: f64,
 }
 
+struct CorrectionColumns {
+    normal_hours: String,
+    normal_ot: String,
+    weekend_ot: String,
+    holiday_ot: String,
+}
+
+struct PayrollLayout {
+    project: String,
+    passport: String,
+    name: String,
+    position: String,
+    normal_hours: String,
+    normal_ot: String,
+    weekend_ot: String,
+    holiday_ot: String,
+}
+
 #[derive(Clone, Default)]
 struct GraveyardRecord {
     hours_by_day: HashMap<i32, f64>,
@@ -273,7 +291,10 @@ pub fn run_generate(payload: GeneratePayload) -> Result<GenerateResult, String> 
     let month_start = excel_serial_to_date(parse_number(main_template.sheet.value(&format!("{}3", layout.month_col)))? as i32)?;
     let month_days = days_in_month(month_start.0, month_start.1);
     let (day_headers, employees) = match read_summary_table(&summary_book, summary_sheet) {
-        Ok(result) => result,
+        Ok((day_headers, employees)) => (
+            day_headers.into_iter().filter(|(day, _)| *day <= month_days).collect(),
+            employees,
+        ),
         Err(summary_error) => {
             let day_headers = template_month_headers(main_template, month_start, month_days, &layout);
             let employees = read_payroll_summary(summary_sheet, &day_headers, &schedule)
@@ -282,7 +303,7 @@ pub fn run_generate(payload: GeneratePayload) -> Result<GenerateResult, String> 
         }
     };
     if employees.is_empty() {
-        return Err("Rust 生成引擎未读取到员工数据，请确认 A/E/F/G/K/L/M 列结构".to_string());
+        return Err("Rust 生成引擎未读取到员工数据，请确认汇总表表头和员工数据".to_string());
     }
     let graveyard_path = payload
         .graveyard_shift_path
@@ -370,6 +391,7 @@ pub fn run_generate(payload: GeneratePayload) -> Result<GenerateResult, String> 
 
 fn read_summary_table(book: &Workbook, sheet: &WorkbookSheet) -> Result<(Vec<(i32, String)>, Vec<Employee>), String> {
     let day_headers = group_day_types(book, sheet)?;
+    let correction_columns = find_correction_columns(&sheet.sheet);
     let mut employees = Vec::new();
     let mut row = 3;
     loop {
@@ -398,10 +420,10 @@ fn read_summary_table(book: &Workbook, sheet: &WorkbookSheet) -> Result<(Vec<(i3
             crew_group: sheet.sheet.value(&format!("G{row}")).trim().to_string(),
             position,
             days,
-            correction_nwh: parse_optional_number(sheet.sheet.value(&format!("BQ{row}"))),
-            correction_normal_ot: parse_optional_number(sheet.sheet.value(&format!("BR{row}"))),
-            correction_weekend_ot: parse_optional_number(sheet.sheet.value(&format!("BS{row}"))),
-            correction_holiday_ot: parse_optional_number(sheet.sheet.value(&format!("BT{row}"))),
+            correction_nwh: parse_optional_number(sheet.sheet.value(&format!("{}{row}", correction_columns.normal_hours))),
+            correction_normal_ot: parse_optional_number(sheet.sheet.value(&format!("{}{row}", correction_columns.normal_ot))),
+            correction_weekend_ot: parse_optional_number(sheet.sheet.value(&format!("{}{row}", correction_columns.weekend_ot))),
+            correction_holiday_ot: parse_optional_number(sheet.sheet.value(&format!("{}{row}", correction_columns.holiday_ot))),
         });
         row += 1;
     }
@@ -412,12 +434,13 @@ fn read_summary_table(book: &Workbook, sheet: &WorkbookSheet) -> Result<(Vec<(i3
 }
 
 fn read_payroll_summary(sheet: &WorkbookSheet, day_headers: &[(i32, String)], schedule: &Schedule) -> Result<Vec<Employee>, String> {
+    let layout = find_payroll_layout(&sheet.sheet);
     let mut employees = Vec::new();
     let mut row = 3;
     loop {
         let no_raw = sheet.sheet.value(&format!("A{row}")).trim().to_string();
-        let name = sheet.sheet.value(&format!("E{row}")).trim().to_string();
-        let position = sheet.sheet.value(&format!("F{row}")).trim().to_string();
+        let name = sheet.sheet.value(&format!("{}{row}", layout.name)).trim().to_string();
+        let position = sheet.sheet.value(&format!("{}{row}", layout.position)).trim().to_string();
         if no_raw.is_empty() && name.is_empty() && position.is_empty() {
             break;
         }
@@ -425,28 +448,97 @@ fn read_payroll_summary(sheet: &WorkbookSheet, day_headers: &[(i32, String)], sc
             row += 1;
             continue;
         };
-        let normal_hours = parse_optional_number(sheet.sheet.value(&format!("G{row}")));
+        let normal_hours = parse_optional_number(sheet.sheet.value(&format!("{}{row}", layout.normal_hours)));
         let (days, correction_nwh) = distribute_normal_hours(normal_hours, day_headers, schedule);
         employees.push(Employee {
             no: no as i32,
             employee_no: String::new(),
-            project: sheet.sheet.value(&format!("C{row}")).trim().to_string(),
-            passport: sheet.sheet.value(&format!("D{row}")).trim().to_string(),
+            project: sheet.sheet.value(&format!("{}{row}", layout.project)).trim().to_string(),
+            passport: sheet.sheet.value(&format!("{}{row}", layout.passport)).trim().to_string(),
             crew_group: String::new(),
             name,
             position,
             days,
             correction_nwh,
-            correction_normal_ot: parse_optional_number(sheet.sheet.value(&format!("K{row}"))),
-            correction_weekend_ot: parse_optional_number(sheet.sheet.value(&format!("L{row}"))),
-            correction_holiday_ot: parse_optional_number(sheet.sheet.value(&format!("M{row}"))),
+            correction_normal_ot: parse_optional_number(sheet.sheet.value(&format!("{}{row}", layout.normal_ot))),
+            correction_weekend_ot: parse_optional_number(sheet.sheet.value(&format!("{}{row}", layout.weekend_ot))),
+            correction_holiday_ot: parse_optional_number(sheet.sheet.value(&format!("{}{row}", layout.holiday_ot))),
         });
         row += 1;
     }
     if employees.is_empty() {
-        return Err("工资汇总表未读取到员工数据，请确认 A/E/F/G/K/L/M 列结构".to_string());
+        return Err("工资汇总表未读取到员工数据，请确认序号、姓名、岗位和工时表头".to_string());
     }
     Ok(employees)
+}
+
+fn normalize_header(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn find_header_column_in_range(sheet: &Sheet, rows: &[i32], aliases: &[&str], from_col: i32, to_col: i32) -> Option<String> {
+    (from_col..=to_col).find_map(|column| {
+        let column_name = num_to_col(column);
+        let header = rows
+            .iter()
+            .map(|row| sheet.value(&format!("{column_name}{row}")))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let normalized = normalize_header(&header);
+        aliases.iter().any(|alias| normalized.contains(alias)).then_some(column_name)
+    })
+}
+
+fn find_correction_columns(sheet: &Sheet) -> CorrectionColumns {
+    let scan_end = col_to_num("CZ");
+    let group_start = (col_to_num("AO")..=scan_end).find(|column| {
+        let header = normalize_header(sheet.value(&format!("{}1", num_to_col(*column))));
+        header.contains("差异")
+            || header.contains("correction")
+            || header.contains("adjustment")
+            || header.contains("discrepanc")
+            || header.contains("difference")
+    });
+    let Some(group_start) = group_start else {
+        return CorrectionColumns {
+            normal_hours: "BQ".to_string(),
+            normal_ot: "BR".to_string(),
+            weekend_ot: "BS".to_string(),
+            holiday_ot: "BT".to_string(),
+        };
+    };
+    let group_end = (group_start + 8).min(scan_end);
+    CorrectionColumns {
+        normal_hours: find_header_column_in_range(sheet, &[2], &["nwh", "日常出勤"], group_start, group_end)
+            .unwrap_or_else(|| num_to_col(group_start + 1)),
+        normal_ot: find_header_column_in_range(sheet, &[2], &["ot1", "日常加班"], group_start, group_end)
+            .unwrap_or_else(|| num_to_col(group_start + 2)),
+        weekend_ot: find_header_column_in_range(sheet, &[2], &["ot2", "weekend", "休息日加班"], group_start, group_end)
+            .unwrap_or_else(|| num_to_col(group_start + 3)),
+        holiday_ot: find_header_column_in_range(sheet, &[2], &["ot3", "publicholiday", "节假日加班"], group_start, group_end)
+            .unwrap_or_else(|| num_to_col(group_start + 4)),
+    }
+}
+
+fn find_payroll_layout(sheet: &Sheet) -> PayrollLayout {
+    let first = col_to_num("A");
+    let last = col_to_num("AZ");
+    PayrollLayout {
+        project: find_header_column_in_range(sheet, &[1, 2], &["project", "项目"], first, last).unwrap_or_else(|| "C".to_string()),
+        passport: find_header_column_in_range(sheet, &[1, 2], &["passport", "护照"], first, last).unwrap_or_else(|| "D".to_string()),
+        name: find_header_column_in_range(sheet, &[1, 2], &["name", "姓名"], first, last).unwrap_or_else(|| "E".to_string()),
+        position: find_header_column_in_range(sheet, &[1, 2], &["position", "岗位"], first, last).unwrap_or_else(|| "F".to_string()),
+        normal_hours: find_header_column_in_range(sheet, &[1, 2], &["normalhours", "正常工时", "常规工作小时"], first, last)
+            .unwrap_or_else(|| "G".to_string()),
+        normal_ot: find_header_column_in_range(sheet, &[2], &["ot1normal", "日常加班"], first, last).unwrap_or_else(|| "K".to_string()),
+        weekend_ot: find_header_column_in_range(sheet, &[2], &["ot2weekend", "休息日加班"], first, last).unwrap_or_else(|| "L".to_string()),
+        holiday_ot: find_header_column_in_range(sheet, &[2], &["ot3publicholiday", "节假日加班"], first, last)
+            .unwrap_or_else(|| "M".to_string()),
+    }
 }
 
 fn template_month_headers(
@@ -748,15 +840,7 @@ fn write_employee(
         rest_ot_sum += result.rest_hours;
         holiday_ot_sum += result.holiday_hours;
         if result.work_ot > 0.0 || result.rest_hours > 0.0 || result.holiday_hours > 0.0 {
-            let (start, end) = if kind == "work" {
-                let start = schedule.afternoon_start + schedule.normal_hours / 24.0;
-                (Some(start), Some(start + result.work_ot / 24.0))
-            } else if let DayEntry::Hours(hours) = entry {
-                let (start, _, _, end) = day_time_inputs(*hours, schedule);
-                (start, end)
-            } else {
-                (None, None)
-            };
+            let (start, end) = overtime_time_inputs(kind, entry, result.work_ot, schedule);
             overtime_entries.push(OvertimeEntry {
                 day: *day,
                 start,
@@ -2420,6 +2504,23 @@ fn day_time_inputs(hours: f64, schedule: &Schedule) -> (Option<f64>, Option<f64>
     (Some(schedule.morning_start), Some(schedule.morning_end), Some(schedule.afternoon_start), Some(schedule.afternoon_start + (hours - morning_hours) / 24.0))
 }
 
+fn overtime_time_inputs(
+    day_type: &str,
+    entry: &DayEntry,
+    normal_overtime_hours: f64,
+    schedule: &Schedule,
+) -> (Option<f64>, Option<f64>) {
+    if day_type == "work" {
+        let start = schedule.afternoon_end;
+        return (Some(start), Some(start + normal_overtime_hours / 24.0));
+    }
+    if let DayEntry::Hours(hours) = entry {
+        let (start, _, _, end) = day_time_inputs(*hours, schedule);
+        return (start, end);
+    }
+    (None, None)
+}
+
 fn fill_day_updates(
     updates: &mut HashMap<String, CellValue>,
     row: i32,
@@ -2737,6 +2838,20 @@ mod tests {
     }
 
     #[test]
+    fn normal_overtime_starts_at_configured_afternoon_end() {
+        let schedule = Schedule {
+            morning_start: parse_time("06:00").unwrap(),
+            morning_end: parse_time("12:00").unwrap(),
+            afternoon_start: parse_time("14:00").unwrap(),
+            afternoon_end: parse_time("19:00").unwrap(),
+            normal_hours: 10.0,
+        };
+        let (start, end) = overtime_time_inputs("work", &DayEntry::Hours(11.5), 1.5, &schedule);
+        assert!((start.unwrap() - parse_time("19:00").unwrap()).abs() < 0.000001);
+        assert!((end.unwrap() - parse_time("20:30").unwrap()).abs() < 0.000001);
+    }
+
+    #[test]
     fn correction_row_marker_can_be_outside_column_a() {
         let sheet = Sheet {
             cells: HashMap::from([(
@@ -2748,6 +2863,38 @@ mod tests {
             )]),
         };
         assert_eq!(find_correction_row(&sheet), Some(40));
+    }
+
+    #[test]
+    fn external_summary_layout_follows_headers() {
+        let sheet = Sheet {
+            cells: HashMap::from([
+                ("BQ1".to_string(), CellData { value: "8月预估与实际差异".to_string(), style: None }),
+                ("BR2".to_string(), CellData { value: "NWH（日常出勤）".to_string(), style: None }),
+                ("BS2".to_string(), CellData { value: "OT1-NORMAL（日常加班）".to_string(), style: None }),
+                ("BT2".to_string(), CellData { value: "OT2-WEEKEND（休息日加班）".to_string(), style: None }),
+                ("BU2".to_string(), CellData { value: "OT3-PUBLIC HOLIDAY（节假日加班）".to_string(), style: None }),
+                ("C1".to_string(), CellData { value: "Project".to_string(), style: None }),
+                ("D1".to_string(), CellData { value: "Passport/BDG. NO.".to_string(), style: None }),
+                ("E1".to_string(), CellData { value: "Name".to_string(), style: None }),
+                ("G1".to_string(), CellData { value: "Position".to_string(), style: None }),
+                ("H1".to_string(), CellData { value: "NormalHours".to_string(), style: None }),
+                ("L2".to_string(), CellData { value: "OT1-NORMAL".to_string(), style: None }),
+                ("M2".to_string(), CellData { value: "OT2-WEEKEND".to_string(), style: None }),
+                ("N2".to_string(), CellData { value: "OT3-PUBLIC HOLIDAY".to_string(), style: None }),
+            ]),
+        };
+        let corrections = find_correction_columns(&sheet);
+        assert_eq!(corrections.normal_hours, "BR");
+        assert_eq!(corrections.normal_ot, "BS");
+        assert_eq!(corrections.weekend_ot, "BT");
+        assert_eq!(corrections.holiday_ot, "BU");
+        let payroll = find_payroll_layout(&sheet);
+        assert_eq!(payroll.position, "G");
+        assert_eq!(payroll.normal_hours, "H");
+        assert_eq!(payroll.normal_ot, "L");
+        assert_eq!(payroll.weekend_ot, "M");
+        assert_eq!(payroll.holiday_ot, "N");
     }
 
     #[test]
