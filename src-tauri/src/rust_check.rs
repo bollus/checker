@@ -160,7 +160,6 @@ pub fn run_check(payload: CheckPayload) -> Result<CheckResult, String> {
     };
     let table_b_index = build_table_b_index(&table_bs_folder)?;
     let mut warnings = table_b_index.warnings;
-    warnings.push(format!("核对模板: {}", payload.template.name));
 
     let table_a_book = Workbook::open(&table_a_path)?;
     let table_a_sheet_info = table_a_book
@@ -217,7 +216,14 @@ pub fn run_check(payload: CheckPayload) -> Result<CheckResult, String> {
     }
 
     write_highlighted_workbook(&table_a_book, table_a_sheet_info, &mismatches, &output_path)?;
-    create_report(&report_path, &table_a_path, &output_path, &warnings, &mismatches)?;
+    create_report(
+        &report_path,
+        &table_a_path,
+        &output_path,
+        &payload.template.name,
+        &warnings,
+        &mismatches,
+    )?;
 
     Ok(CheckResult {
         output_path: output_path.to_string_lossy().to_string(),
@@ -1455,9 +1461,17 @@ fn next_report_path(output_path: &Path) -> PathBuf {
     output_path.with_file_name(format!("{stem}_核对报告.txt"))
 }
 
-fn create_report(report_path: &Path, table_a_path: &Path, output_path: &Path, warnings: &[String], mismatches: &[Mismatch]) -> Result<(), String> {
+fn create_report(
+    report_path: &Path,
+    table_a_path: &Path,
+    output_path: &Path,
+    template_name: &str,
+    warnings: &[String],
+    mismatches: &[Mismatch],
+) -> Result<(), String> {
     let mut lines = vec![
         format!("主表: {}", table_a_path.display()),
+        format!("核对模板: {template_name}"),
         format!("结果文件: {}", output_path.display()),
         format!("不一致数量: {}", mismatches.len()),
         String::new(),
@@ -1689,6 +1703,7 @@ mod tests {
             template,
         })
         .unwrap();
+        assert!(result.warnings.iter().all(|warning| !warning.starts_with("核对模板:")));
         if result.mismatch_count != 1 {
             eprintln!("mismatch_count={}", result.mismatch_count);
             for item in result.mismatches.iter().take(12) {

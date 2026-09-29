@@ -13,7 +13,23 @@ pub mod rust_generate;
 use std::os::windows::process::CommandExt;
 
 #[cfg(target_os = "windows")]
+use std::os::windows::ffi::OsStrExt;
+
+#[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+#[cfg(target_os = "windows")]
+#[link(name = "shell32")]
+extern "system" {
+    fn ShellExecuteW(
+        hwnd: *mut std::ffi::c_void,
+        operation: *const u16,
+        file: *const u16,
+        parameters: *const u16,
+        directory: *const u16,
+        show_command: i32,
+    ) -> isize;
+}
 
 fn hide_console_window(command: &mut Command) -> &mut Command {
     #[cfg(target_os = "windows")]
@@ -21,6 +37,33 @@ fn hide_console_window(command: &mut Command) -> &mut Command {
         command.creation_flags(CREATE_NO_WINDOW);
     }
     command
+}
+
+#[cfg(target_os = "windows")]
+fn open_with_default_app(path: &Path) -> Result<(), String> {
+    let operation = "open".encode_utf16().chain(std::iter::once(0)).collect::<Vec<_>>();
+    let file = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect::<Vec<_>>();
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+        )
+    };
+    if result <= 32 {
+        let reason = match result {
+            2 => "文件不存在",
+            3 => "路径不存在",
+            5 => "访问被拒绝",
+            31 => "没有关联的默认应用",
+            _ => "Windows 无法启动默认应用",
+        };
+        return Err(format!("打开文件失败: {reason} (ShellExecuteW={result})"));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -162,20 +205,28 @@ async fn open_path(path: String) -> Result<(), String> {
     if !target.exists() {
         return Err(format!("路径不存在: {path}"));
     }
-    let command_result = if cfg!(target_os = "windows") {
-        let mut command = Command::new("powershell");
-        command.args(["-NoProfile", "-Command", "Start-Process -LiteralPath $args[0]"]);
-        command.arg(&path);
-        hide_console_window(&mut command).status()
-    } else if cfg!(target_os = "macos") {
+
+    #[cfg(target_os = "windows")]
+    {
+        return open_with_default_app(&target);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    let command_result = if cfg!(target_os = "macos") {
         Command::new("open").arg(target).status()
     } else {
         Command::new("xdg-open").arg(target).status()
     };
+
+    #[cfg(not(target_os = "windows"))]
     let status = command_result.map_err(|err| format!("打开文件失败: {err}"))?;
+
+    #[cfg(not(target_os = "windows"))]
     if !status.success() {
         return Err(format!("打开文件失败: {status}"));
     }
+
+    #[cfg(not(target_os = "windows"))]
     Ok(())
 }
 
