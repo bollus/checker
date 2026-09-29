@@ -1115,31 +1115,54 @@ fn infer_data_end_row(sheet: &Sheet, start_row: u32, start_col: &str, end_col: &
     }
     if current <= 2000 && is_adjustment_row(sheet, current, start_col, end_col) {
         last_seen = current;
+    } else {
+        for candidate in (current + 1)..=(current + 12).min(2000) {
+            let text = row_display_text(sheet, candidate, end_col);
+            if is_explicit_adjustment_text(&text) {
+                last_seen = candidate;
+                break;
+            }
+            if text.contains("TOTAL")
+                || text.contains("合计")
+                || text.contains("总计")
+                || text.contains("APPROVAL")
+                || text.contains("SIGNATURE")
+            {
+                break;
+            }
+        }
     }
     last_seen
 }
 
 fn is_adjustment_row(sheet: &Sheet, row: u32, start_col: &str, end_col: &str) -> bool {
-    let row_text = (1..=col_to_num(end_col).max(13))
-        .map(|col| sheet.get_value(&format!("{}{row}", num_to_col(col))))
-        .filter(|value| !value.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_uppercase();
+    let row_text = row_display_text(sheet, row, end_col);
     if row_text.contains("TOTAL") || row_text.contains("合计") || row_text.contains("总计") {
         return false;
     }
-    if row_text.contains("FIX OT")
-        || row_text.contains("CORRECTION")
-        || row_text.contains("ADJUSTMENT")
-        || (row_text.contains("修正") && (row_text.contains("加班") || row_text.contains("工时")))
-    {
+    if is_explicit_adjustment_text(&row_text) {
         return true;
     }
     (col_to_num(start_col)..=col_to_num(end_col)).any(|col| {
         let value = sheet.get_value(&format!("{}{row}", num_to_col(col))).trim();
         !value.is_empty() && parse_number(value).is_ok()
     })
+}
+
+fn row_display_text(sheet: &Sheet, row: u32, end_col: &str) -> String {
+    (1..=col_to_num(end_col).max(13))
+        .map(|col| sheet.get_value(&format!("{}{row}", num_to_col(col))))
+        .filter(|value| !value.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_uppercase()
+}
+
+fn is_explicit_adjustment_text(row_text: &str) -> bool {
+    row_text.contains("FIX OT")
+        || row_text.contains("CORRECTION")
+        || row_text.contains("ADJUSTMENT")
+        || (row_text.contains("修正") && (row_text.contains("加班") || row_text.contains("工时")))
 }
 
 fn is_data_anchor(value: &str) -> bool {
@@ -1515,6 +1538,27 @@ mod tests {
             styles: HashMap::new(),
         };
         assert_eq!(resolve_table_b_value(&sheet, "SUM(G10:GN)").unwrap(), "17.5");
+    }
+
+    #[test]
+    fn sum_expression_finds_adjustment_after_spacer_row() {
+        let sheet = Sheet {
+            cells: HashMap::from([
+                ("A10".to_string(), "1-Sep".to_string()),
+                ("A11".to_string(), "2-Sep".to_string()),
+                ("G10".to_string(), "10".to_string()),
+                ("G11".to_string(), "10".to_string()),
+                ("A13".to_string(), "修正上月加班时长".to_string()),
+                ("G13".to_string(), "-4".to_string()),
+                ("H13".to_string(), "2.5".to_string()),
+                ("J13".to_string(), "9.5".to_string()),
+                ("A14".to_string(), "APPROVALS".to_string()),
+            ]),
+            styles: HashMap::new(),
+        };
+        assert_eq!(resolve_table_b_value(&sheet, "SUM(G10:GN)").unwrap(), "16");
+        assert_eq!(resolve_table_b_value(&sheet, "SUM(H10:HN)").unwrap(), "2.5");
+        assert_eq!(resolve_table_b_value(&sheet, "SUM(J10:JN)").unwrap(), "9.5");
     }
 
     #[test]
