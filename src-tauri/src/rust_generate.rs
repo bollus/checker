@@ -785,7 +785,7 @@ fn write_employee(
         .filter_map(|(day, _)| {
             let entry = employee.days.get(day).unwrap_or(&DayEntry::Blank);
             if entry_is_attended(entry)
-                || matches!(entry, DayEntry::Leave(code) if leave_counts_as_paid_vacation(code) || code == "S" || code == "C")
+                || matches!(entry, DayEntry::Leave(code) if leave_counts_as_attendance(code) || leave_counts_as_paid_vacation(code) || code == "S")
             {
                 Some(*day)
             } else {
@@ -910,6 +910,9 @@ fn write_employee(
         }
         if kind == "rest" && entry_is_attended(entry) {
             rest_attendance += 1;
+        }
+        if matches!(entry, DayEntry::Leave(code) if leave_counts_as_attendance(code)) {
+            continue;
         }
         if !count_holidays && matches!(entry, DayEntry::Leave(code) if leave_counts_as_paid_vacation(code)) {
             continue;
@@ -2578,6 +2581,19 @@ fn fill_day_updates(
             }
             result.payable = true;
         }
+        DayEntry::Leave(code) if leave_counts_as_attendance(code) => {
+            set_optional_number(updates, &format!("C{row}"), Some(schedule.morning_start));
+            set_optional_number(updates, &format!("D{row}"), Some(schedule.morning_end));
+            set_optional_number(updates, &format!("E{row}"), Some(schedule.afternoon_start));
+            set_optional_number(updates, &format!("F{row}"), Some(schedule.afternoon_end));
+            set_optional_number(updates, &format!("{}{row}", layout.actual_checkout_col), Some(schedule.afternoon_end));
+            updates.insert(
+                format!("{}{row}", layout.remark_col),
+                CellValue::Text(leave_label(code).to_string()),
+            );
+            result.work_hours = schedule.normal_hours;
+            result.payable = true;
+        }
         DayEntry::Leave(code) => {
             updates.insert(
                 format!("{}{row}", layout.remark_col),
@@ -2638,7 +2654,11 @@ fn leave_label(code: &str) -> &'static str {
 }
 
 fn leave_counts_as_paid_vacation(code: &str) -> bool {
-    matches!(code, "M" | "R" | "T" | "V")
+    matches!(code, "M" | "T" | "V")
+}
+
+fn leave_counts_as_attendance(code: &str) -> bool {
+    matches!(code, "C" | "R")
 }
 
 fn entry_is_attended(entry: &DayEntry) -> bool {
@@ -2686,7 +2706,7 @@ fn unpaid_adjacent_special_days(employee: &Employee, day_headers: &[(i32, String
         for day in group {
             let entry = employee.days.get(&day).unwrap_or(&DayEntry::Blank);
             if !entry_is_attended(entry)
-                && !matches!(entry, DayEntry::Leave(code) if code == "S" || leave_counts_as_paid_vacation(code))
+                && !matches!(entry, DayEntry::Leave(code) if leave_counts_as_attendance(code) || code == "S" || leave_counts_as_paid_vacation(code))
             {
                 result.insert(day);
             }
@@ -2852,8 +2872,57 @@ mod tests {
         for code in ["A", "C", "E", "H", "M", "R", "S", "T", "V"] {
             assert_eq!(parse_summary_value(code).unwrap(), DayEntry::Leave(code.to_string()));
         }
-        assert!(leave_counts_as_paid_vacation("R"));
+        assert!(leave_counts_as_attendance("C"));
+        assert!(leave_counts_as_attendance("R"));
+        assert!(!leave_counts_as_paid_vacation("R"));
         assert!(!leave_counts_as_paid_vacation("H"));
+    }
+
+    #[test]
+    fn c_and_r_codes_generate_normal_attendance_hours() {
+        let schedule = Schedule {
+            morning_start: parse_time("06:00").unwrap(),
+            morning_end: parse_time("12:00").unwrap(),
+            afternoon_start: parse_time("14:00").unwrap(),
+            afternoon_end: parse_time("18:00").unwrap(),
+            normal_hours: 10.0,
+        };
+        let layout = TimesheetLayout {
+            employee_no_col: "J".to_string(),
+            month_col: "M".to_string(),
+            vacation_col: "J".to_string(),
+            sick_col: "K".to_string(),
+            rest_col: "L".to_string(),
+            emergency_col: "M".to_string(),
+            remark_col: "K".to_string(),
+            graveyard_col: None,
+            actual_checkout_col: "N".to_string(),
+            attendance_diff_col: "O".to_string(),
+            normal_adjust_col: "P".to_string(),
+            weekend_adjust_col: "Q".to_string(),
+            holiday_adjust_col: "R".to_string(),
+            payable_marker_col: "T".to_string(),
+        };
+        for code in ["C", "R"] {
+            let mut updates = HashMap::new();
+            let result = fill_day_updates(
+                &mut updates,
+                10,
+                (2026, 10, 1),
+                1,
+                "work",
+                &DayEntry::Leave(code.to_string()),
+                (Some(1), Some(31), false, false),
+                &HashSet::new(),
+                &schedule,
+                &layout,
+            );
+            assert_eq!(result.work_hours, 10.0);
+            assert!(result.payable);
+            assert!(matches!(updates.get("G10"), Some(CellValue::Number(value)) if *value == 10.0));
+            assert!(matches!(updates.get("C10"), Some(CellValue::Number(_))));
+            assert!(matches!(updates.get("F10"), Some(CellValue::Number(_))));
+        }
     }
 
     #[test]
