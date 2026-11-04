@@ -724,7 +724,7 @@ fn parse_summary_value(raw: &str) -> Result<DayEntry, String> {
         return Ok(DayEntry::Blank);
     }
     let upper = text.to_ascii_uppercase();
-    if matches!(upper.as_str(), "A" | "C" | "E" | "S" | "V") {
+    if matches!(upper.as_str(), "A" | "C" | "E" | "H" | "M" | "R" | "S" | "T" | "V") {
         return Ok(DayEntry::Leave(upper));
     }
     Ok(DayEntry::Hours(parse_number(text)?))
@@ -785,7 +785,7 @@ fn write_employee(
         .filter_map(|(day, _)| {
             let entry = employee.days.get(day).unwrap_or(&DayEntry::Blank);
             if entry_is_attended(entry)
-                || matches!(entry, DayEntry::Leave(code) if code == "V" || code == "S" || code == "C")
+                || matches!(entry, DayEntry::Leave(code) if leave_counts_as_paid_vacation(code) || code == "S" || code == "C")
             {
                 Some(*day)
             } else {
@@ -851,7 +851,7 @@ fn write_employee(
             });
         }
         if let DayEntry::Leave(code) = entry {
-            if code == "V" {
+            if leave_counts_as_paid_vacation(code) {
                 vacation_days += 1;
             } else if code == "S" {
                 sick_days += 1;
@@ -911,7 +911,7 @@ fn write_employee(
         if kind == "rest" && entry_is_attended(entry) {
             rest_attendance += 1;
         }
-        if !count_holidays && matches!(entry, DayEntry::Leave(code) if code == "V") {
+        if !count_holidays && matches!(entry, DayEntry::Leave(code) if leave_counts_as_paid_vacation(code)) {
             continue;
         }
         if kind == "holiday"
@@ -2583,7 +2583,7 @@ fn fill_day_updates(
                 format!("{}{row}", layout.remark_col),
                 CellValue::Text(leave_label(code).to_string()),
             );
-            result.payable = code == "V" || code == "S";
+            result.payable = code == "S" || leave_counts_as_paid_vacation(code);
         }
         _ => {
             let (first_active, last_active, prefix_unpaid, suffix_unpaid) = payable_context;
@@ -2627,10 +2627,18 @@ fn leave_label(code: &str) -> &'static str {
         "A" => "Absent",
         "C" => "Working in China",
         "E" => "Emergency Leave",
+        "H" => "Hajj Leave",
+        "M" => "Maternity Leave",
+        "R" => "Parental Leave",
         "S" => "Sick Leave",
+        "T" => "Study Leave",
         "V" => "Vacation",
         _ => "",
     }
+}
+
+fn leave_counts_as_paid_vacation(code: &str) -> bool {
+    matches!(code, "M" | "R" | "T" | "V")
 }
 
 fn entry_is_attended(entry: &DayEntry) -> bool {
@@ -2677,7 +2685,9 @@ fn unpaid_adjacent_special_days(employee: &Employee, day_headers: &[(i32, String
         }
         for day in group {
             let entry = employee.days.get(&day).unwrap_or(&DayEntry::Blank);
-            if !entry_is_attended(entry) && !matches!(entry, DayEntry::Leave(code) if code == "S" || code == "V") {
+            if !entry_is_attended(entry)
+                && !matches!(entry, DayEntry::Leave(code) if code == "S" || leave_counts_as_paid_vacation(code))
+            {
                 result.insert(day);
             }
         }
@@ -2835,6 +2845,15 @@ mod tests {
         let serial = date_to_excel_serial(2026, 6, 1);
         assert_eq!(excel_serial_to_date(serial).unwrap(), (2026, 6, 1));
         assert_eq!(weekday_name(2026, 6, 5), "Friday");
+    }
+
+    #[test]
+    fn summary_parser_accepts_supported_leave_codes() {
+        for code in ["A", "C", "E", "H", "M", "R", "S", "T", "V"] {
+            assert_eq!(parse_summary_value(code).unwrap(), DayEntry::Leave(code.to_string()));
+        }
+        assert!(leave_counts_as_paid_vacation("R"));
+        assert!(!leave_counts_as_paid_vacation("H"));
     }
 
     #[test]
